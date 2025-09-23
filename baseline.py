@@ -25,8 +25,7 @@ except ImportError as e:
     msg_box = QMessageBox()
     msg_box.setIcon(QMessageBox.Critical)
     msg_box.setText(f"Missing required Python library: {e.name}")
-    msg_box.setInformativeText(
-        "Please install it using: 'pip install numpy opencv-python scikit-image PyQt5 scikit-learn'")
+    msg_box.setInformativeText("Please install it using: 'pip install numpy opencv-python scikit-image PyQt5 scikit-learn'")
     msg_box.setWindowTitle("Dependency Error")
     msg_box.exec_()
     sys.exit(1)
@@ -355,12 +354,7 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
-<<<<<<< HEAD
-def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray,
-                                app_instance: 'VesselTracerApp') -> np.ndarray:
-=======
 def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
     """Generates a map where each pixel's value represents path coherence from a start node.
 
     This is done using a Dijkstra-like search where the 'cost' is a measure of
@@ -399,7 +393,7 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
                 neighbor = (current[0] + dr, current[1] + dc)
 
                 if not (0 <= neighbor[0] < vessel_mask.shape[0] and 0 <= neighbor[1] < vessel_mask.shape[1]) or \
-                        vessel_mask[neighbor] == 0:
+                   vessel_mask[neighbor] == 0:
                     continue
 
                 # Calculate incoherence cost for this step
@@ -421,7 +415,7 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
                 incoherence += app_instance.COHERENCE_COLOR_CHANGE_PENALTY * (color_diff / 255.0)
 
                 # 3. Movement cost
-                move_cost = math.sqrt(dr ** 2 + dc ** 2)
+                move_cost = math.sqrt(dr**2 + dc**2)
 
                 new_cost = costs[current] + move_cost + incoherence
                 if new_cost < costs[neighbor]:
@@ -467,10 +461,6 @@ def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndar
 
     return main_vessels_mask.astype(np.uint8)
 
-<<<<<<< HEAD
-
-=======
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndarray) -> Optional[np.ndarray]:
     """
     Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
@@ -501,11 +491,7 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
     # Process the first frame to initialize vessel identities
     if np.any(masks[0]):
         num_labels, labels = cv2.connectedComponents(masks[0])
-<<<<<<< HEAD
-        for label_idx in range(1, num_labels):  # Skip background label 0
-=======
         for label_idx in range(1, num_labels): # Skip background label 0
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             component_mask = (labels == label_idx)
             identity_map[component_mask] = next_vessel_id
             next_vessel_id += 1
@@ -513,11 +499,7 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
     # Process subsequent frames
     for i in range(1, len(masks)):
         # Get the new components from the current frame that are not in the previous one
-<<<<<<< HEAD
-        new_growth_mask = cv2.subtract(masks[i], masks[i - 1])
-=======
         new_growth_mask = cv2.subtract(masks[i], masks[i-1])
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 
         if not np.any(new_growth_mask):
             continue
@@ -528,11 +510,7 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
             component_mask = (labels == label_idx)
 
             # To link a new component, we check its boundary against the existing identity map
-<<<<<<< HEAD
-            kernel = np.ones((3, 3), np.uint8)
-=======
             kernel = np.ones((3,3), np.uint8)
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             eroded_component = cv2.erode(component_mask.astype(np.uint8), kernel, iterations=1)
             boundary_mask = component_mask & ~eroded_component.astype(bool)
 
@@ -555,64 +533,21 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
 
     return identity_map
 
-<<<<<<< HEAD
-
-=======
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 # --- State Management Enums ---
 
 class AppState(Enum):
     """Defines the possible states of the application's finite state machine."""
-    IDLE = auto()  # Application is waiting for images to be loaded.
-    LOADED = auto()  # Images are loaded, ready for user interaction.
-    MARKING_PATH = auto()  # User is actively marking points on the image.
+    IDLE = auto()             # Application is waiting for images to be loaded.
+    LOADED = auto()           # Images are loaded, ready for user interaction.
+    MARKING_PATH = auto()     # User is actively marking points on the image.
     RANGE_CONFIRMED = auto()  # User has confirmed points, ready for configuration or analysis.
-    PROCESSING = auto()  # Application is busy with a background task (e.g., mask generation).
-    DONE = auto()  # Analysis is complete and results are shown.
+    PROCESSING = auto()       # Application is busy with a background task (e.g., mask generation).
+    DONE = auto()             # Analysis is complete and results are shown.
 
 
 class DrawingMode(Enum):
     """Defines the available drawing modes for the user."""
-    NOISE_ROI = auto()  # User is drawing a rectangle to define a noise area.
-
-
-class AnalysisWorker(QThread):
-    """A QThread worker for running analysis tasks in the background."""
-    analysis_complete = pyqtSignal(dict)
-
-    def __init__(self, app_instance, start_point):
-        super().__init__()
-        self.app = app_instance
-        self.start_point = start_point
-        self.is_running = True
-
-    def run(self):
-        """Runs the analysis pipeline."""
-        results = {"success": False}
-        # Call prepare_and_generate_masks without a worker_thread to prevent UI creation
-        if self.app.base_mask_projection is None:
-            # Pass worker_thread=None to prevent UI creation from background thread
-            if not self.app.prepare_and_generate_masks(worker_thread=None):
-                results["error"] = "Mask generation was canceled or failed during pre-analysis."
-                self.analysis_complete.emit(results)
-                return
-
-        start_node = self.app.find_closest_pixel_on_mask(self.start_point, self.app.base_mask_projection)
-        if not start_node:
-            results["error"] = "Point Not on Vessel"
-            self.analysis_complete.emit(results)
-            return
-
-        full_range_mip = create_maximum_intensity_projection(self.app.images)
-        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, full_range_mip, self.app)
-
-        results["success"] = True
-        results["coherence_map"] = coherence_map
-        results["start_node"] = start_node
-        self.analysis_complete.emit(results)
-
-    def stop(self):
-        self.is_running = False
+    NOISE_ROI = auto()        # User is drawing a rectangle to define a noise area.
 
 
 class AnalysisWorker(QThread):
@@ -1099,74 +1034,68 @@ class VesselTracerApp(QMainWindow):
     def set_stylesheet(self):
         """Sets the QSS dark theme style for the application."""
         style = """
-            QMainWindow, QDialog {
-                background-color: #2D2D2D;
-            }
-            QSplitter::handle {
-                background: #4A4A4A;
-            }
-            QSplitter::handle:horizontal {
-                width: 1px;
-            }
-            QWidget#control_panel {
-                background-color: #353535;
-                border-right: 1px solid #4A4A4A;
+            QMainWindow {
+                background-color: #2E2E2E;
             }
             QGroupBox {
                 background-color: #3C3C3C;
-                border: 1px solid #4A4A4A;
-                border-radius: 6px;
+                border: 1px solid #555;
+                border-radius: 5px;
                 margin-top: 1ex;
-                font-size: 12px;
+                font-size: 14px;
                 font-weight: bold;
                 color: #E0E0E0;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 0 5px;
-                left: 10px;
-                color: #B0B0B0;
+                subcontrol-position: top center;
+                padding: 0 3px;
+                background-color: #3C3C3C;
             }
-            QLabel {
+            QLabel, QStatusBar {
                 color: #D0D0D0;
                 font-size: 12px;
             }
             QPushButton {
-                background-color: #0078D7;
-                color: #FFFFFF;
-                border: none;
+                background-color: #555555;
+                color: #EEEEEE;
+                border: 1px solid #666666;
                 padding: 8px 16px;
                 border-radius: 4px;
                 font-size: 13px;
-                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #008AE6;
+                background-color: #686868;
+                border: 1px solid #777777;
             }
             QPushButton:pressed {
-                background-color: #005A9E;
+                background-color: #4A4A4A;
             }
             QPushButton:disabled {
-                background-color: #4A4A4A;
-                color: #999999;
+                background-color: #404040;
+                color: #888888;
+                border-color: #555555;
             }
             QSlider::groove:horizontal {
                 border: 1px solid #4A4A4A;
-                height: 4px;
-                background: #2D2D2D;
+                height: 8px;
+                background: #404040;
                 margin: 2px 0;
-                border-radius: 2px;
+                border-radius: 4px;
             }
             QSlider::handle:horizontal {
-                background: #0078D7;
-                border: 2px solid #0078D7;
-                width: 14px;
-                margin: -6px 0;
-                border-radius: 8px;
+                background: #00A0A0;
+                border: 1px solid #00A0A0;
+                width: 18px;
+                margin: -5px 0;
+                border-radius: 9px;
             }
-            QStatusBar {
-                color: #A0A0A0;
+            QSlider::handle:horizontal:disabled {
+                background: #777;
+                border-color: #777;
+            }
+            QDialog {
+                background-color: #383838;
             }
         """
         self.setStyleSheet(style)
@@ -1175,95 +1104,68 @@ class VesselTracerApp(QMainWindow):
         """Initializes and arranges all UI components in the main window."""
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
+        self.layout = QVBoxLayout(self.central_widget)
 
-        # Main layout is a horizontal splitter
-        main_layout = QHBoxLayout(self.central_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
+        # --- Layout Optimization: Use GroupBoxes for sections ---
+        main_controls_layout = QHBoxLayout()
 
-        # --- Left Side: Control Panel ---
-        control_panel = QWidget()
-        control_panel.setObjectName("control_panel")  # For styling
-        control_panel.setMinimumWidth(350)
-        control_panel.setMaximumWidth(500)
-        self.controls_layout = QVBoxLayout(control_panel)
-        self.controls_layout.setContentsMargins(10, 10, 10, 10)
-
-        # --- Right Side: Image Display ---
-        image_container = QWidget()
-        image_layout = QVBoxLayout(image_container)
-        image_layout.setContentsMargins(0, 0, 0, 0)
-        self.image_label = ImageLabel(self)
-        image_layout.addWidget(self.image_label)
-
-        splitter.addWidget(control_panel)
-        splitter.addWidget(image_container)
-        splitter.setStretchFactor(0, 0)  # Control panel doesn't expand
-        splitter.setStretchFactor(1, 1)  # Image container expands
-
-        # --- Populate Control Panel ---
         # Group 1: Load
-        group1 = QGroupBox("1. Load Data")
-        group1_layout = QVBoxLayout(group1)
+        group1 = QGroupBox("Step 1: Load Images")
+        group1_layout = QHBoxLayout(group1)
         self.btn_select_folder = QPushButton("Select Image Folder")
         group1_layout.addWidget(self.btn_select_folder)
-        self.controls_layout.addWidget(group1)
+        main_controls_layout.addWidget(group1)
 
-        # Group 2: Pre-processing (Smoothing)
-        group2 = QGroupBox("2. Adjust Pre-processing")
-        group2_layout = QVBoxLayout(group2)
-        self.smoothing_slider_label = QLabel("Smoothing: 4")
-        self.smoothing_slider = QSlider(Qt.Horizontal)
-        self.smoothing_slider.setRange(0, 10)
-        self.smoothing_slider.setValue(4)
-        group2_layout.addWidget(self.smoothing_slider_label)
-        group2_layout.addWidget(self.smoothing_slider)
-        self.controls_layout.addWidget(group2)
-        self.group_smoothing = group2
-
-        # Group 3: Frame Navigation
-        group3 = QGroupBox("Frame Navigation")
-        group3_layout = QHBoxLayout(group3)
-        self.frame_slider = QSlider(Qt.Horizontal)
-        self.frame_info_label = QLabel("--/--")
-        group3_layout.addWidget(self.frame_slider)
-        group3_layout.addWidget(self.frame_info_label)
-        self.controls_layout.addWidget(group3)
-
-        # Group 4: Analysis
-        group4 = QGroupBox("3. Analysis")
-        group4_layout = QVBoxLayout(group4)
-        self.btn_main_action = QPushButton("Start Marking Path")
+        # Group 2: Settings
+        group2 = QGroupBox("Step 2: Mark & Configure")
+        group2_layout = QHBoxLayout(group2)
         self.btn_add_noise_roi = QPushButton("Draw Noise Area")
-        group4_layout.addWidget(self.btn_main_action)
-        group4_layout.addWidget(self.btn_add_noise_roi)
-        self.controls_layout.addWidget(group4)
-        self.group_analysis = group4
+        self.btn_smoothing_preview = QPushButton("Adjust Smoothing")
+        group2_layout.addWidget(self.btn_add_noise_roi)
+        group2_layout.addWidget(self.btn_smoothing_preview)
+        main_controls_layout.addWidget(group2)
+        self.group_tools = group2
 
-        # Group 5: View & Reset
-        group5 = QGroupBox("Tools")
-        group5_layout = QHBoxLayout(group5)
+        # Group 3: Execute
+        group3 = QGroupBox("Step 3: Execute")
+        group3_layout = QHBoxLayout(group3)
+        self.btn_main_action = QPushButton("Start Marking Path")
+        group3_layout.addWidget(self.btn_main_action)
+        main_controls_layout.addWidget(group3)
+
+        # Group 4: Tools
+        group4 = QGroupBox("View & Reset")
+        group4_layout = QHBoxLayout(group4)
         self.btn_show_path = QPushButton("Preview Mask")
         self.btn_step_view = QPushButton("View Steps")
         self.btn_reset = QPushButton("Reset All")
-        group5_layout.addWidget(self.btn_show_path)
-        group5_layout.addWidget(self.btn_step_view)
-        group5_layout.addWidget(self.btn_reset)
-        self.controls_layout.addWidget(group5)
-        self.group_tools = group5
+        group4_layout.addWidget(self.btn_show_path)
+        group4_layout.addWidget(self.btn_step_view)
+        group4_layout.addWidget(self.btn_reset)
+        main_controls_layout.addWidget(group4)
 
-        # Spacer to push everything up
-        self.controls_layout.addStretch(1)
+        self.layout.addLayout(main_controls_layout)
 
-        # Info Label at the bottom of control panel
+        # --- Image Frame Navigation ---
+        frame_nav_layout = QHBoxLayout()
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setEnabled(False)
+        self.frame_info_label = QLabel("Frame: -- / --")
+        frame_nav_layout.addWidget(self.frame_slider)
+        frame_nav_layout.addWidget(self.frame_info_label)
+        self.layout.addLayout(frame_nav_layout)
+
+        # --- Image Display Area ---
+        self.image_label = ImageLabel(self)
+        self.layout.addWidget(self.image_label, 1)  # Allow image area to take more space
+
+        # --- Status/Info Label ---
         self.info_label = QLabel("Please load an image folder to begin.")
-        self.info_label.setWordWrap(True)
         self.info_label.setAlignment(Qt.AlignCenter)
         font = self.info_label.font()
         font.setPointSize(14)
         self.info_label.setFont(font)
-        self.controls_layout.addWidget(self.info_label)
+        self.layout.addWidget(self.info_label)
 
         self.setStatusBar(QStatusBar(self))
 
@@ -1271,9 +1173,8 @@ class VesselTracerApp(QMainWindow):
         self.btn_select_folder.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         self.btn_reset.setIcon(self.style().standardIcon(QStyle.SP_DialogResetButton))
         self.btn_main_action.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
-        self.btn_add_noise_roi.setIcon(self.style().standardIcon(QStyle.SP_LineEditClearButton))
-        self.btn_show_path.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        self.btn_step_view.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.btn_add_noise_roi.setIcon(self.style().standardIcon(QStyle.SP_CustomBase))  # Placeholder icon
+        self.btn_smoothing_preview.setIcon(self.style().standardIcon(QStyle.SP_CustomBase))
 
     def connect_signals(self):
         """Connects all widget signals to their corresponding slots."""
@@ -1281,10 +1182,10 @@ class VesselTracerApp(QMainWindow):
         self.btn_main_action.clicked.connect(self.handle_main_action)
         self.btn_reset.clicked.connect(self.reset_system)
         self.btn_add_noise_roi.clicked.connect(self.add_noise_roi_mode)
-        self.smoothing_slider.valueChanged.connect(self.smoothing_slider_changed)
+        self.btn_smoothing_preview.clicked.connect(self.open_smoothing_preview)
         self.btn_show_path.clicked.connect(self.show_segmented_path_preview)
         self.btn_step_view.clicked.connect(self.show_step_viewer)
-        self.frame_slider.valueChanged.connect(self.frame_slider_changed)
+        self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
 
@@ -1292,80 +1193,61 @@ class VesselTracerApp(QMainWindow):
         """Updates the UI element states (text, enabled/disabled) based on the current AppState."""
         is_interactive = self.app_state != AppState.PROCESSING
 
-        # Default states
-        self.group_smoothing.setEnabled(False)
-        self.group_analysis.setEnabled(False)
-        self.group_tools.setEnabled(False)
-        self.frame_slider.setEnabled(False)
-        self.btn_select_folder.setEnabled(is_interactive)
+        # Define UI configurations for each state
+        state_configs = {
+            AppState.IDLE: {
+                "main_action_text": "Start Marking Path", "main_action_enabled": False,
+                "info_text": "Click 'Select Image Folder' to begin.", "status_text": "Ready",
+                "tools_visible": False, "slider_enabled": False, "select_folder_enabled": True
+            },
+            AppState.LOADED: {
+                "main_action_text": "Start Marking Path", "main_action_enabled": True,
+                "info_text": "Images loaded. Click on the image to mark start, middle, and end points.",
+                "status_text": f"{len(self.images)} images loaded.",
+                "tools_visible": False, "slider_enabled": True, "select_folder_enabled": True
+            },
+            AppState.MARKING_PATH: {
+                "main_action_text": "Confirm Points", "main_action_enabled": len(self.path_points_info) >= 2,
+                "info_text": (f"Start point set. Pre-analysis complete. Please mark your end point." if len(self.path_points_info) == 1 else f"Marked {len(self.path_points_info)} points. Click 'Confirm Points' when done."),
+                "status_text": "Marking path...",
+                "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False
+            },
+            AppState.RANGE_CONFIRMED: {
+                "main_action_text": "Run Full Analysis", "main_action_enabled": True,
+                "info_text": f"Points confirmed. Smoothing: {self.smoothing_level}. Draw noise areas or start analysis.",
+                "status_text": "Ready for analysis...",
+                "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False
+            },
+            AppState.PROCESSING: {
+                "main_action_text": "Processing...", "main_action_enabled": False,
+                "info_text": "Running analysis, please wait...", "status_text": "Processing...",
+                "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False
+            },
+            AppState.DONE: {
+                "main_action_text": "Analysis Complete", "main_action_enabled": False,
+                "info_text": "Path analysis is complete! Reset to start a new analysis.",
+                "status_text": "Done",
+                "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False
+            }
+        }
+
+        config = state_configs.get(self.app_state, state_configs[AppState.IDLE])
+
+        self.btn_main_action.setText(config["main_action_text"])
+        self.btn_main_action.setEnabled(config["main_action_enabled"] and is_interactive)
+        self.info_label.setText(config["info_text"])
+        self.statusBar().showMessage(config["status_text"])
+
+        self.group_tools.setVisible(config["tools_visible"])
+        self.btn_show_path.setVisible(config["tools_visible"])
+        self.btn_step_view.setVisible(config["tools_visible"])
+
+        self.frame_slider.setEnabled(config["slider_enabled"])
+        self.btn_select_folder.setEnabled(config["select_folder_enabled"] and is_interactive)
         self.btn_reset.setEnabled(is_interactive)
 
-        info_text = ""
-        status_text = ""
-        main_action_text = ""
-        main_action_enabled = False
-
-        if self.app_state == AppState.IDLE:
-            info_text = "Click 'Select Image Folder' to begin."
-            status_text = "Ready"
-            main_action_text = "Start Marking Path"
-
-        elif self.app_state == AppState.LOADED:
-            self.group_smoothing.setEnabled(is_interactive)
-            self.group_analysis.setEnabled(is_interactive)
-            self.frame_slider.setEnabled(is_interactive)
-            info_text = "Adjust smoothing, then click 'Start Marking Path'."
-            status_text = f"{len(self.images)} images loaded."
-            main_action_text = "Start Marking Path"
-            main_action_enabled = True
-
-        elif self.app_state == AppState.MARKING_PATH:
-            self.group_smoothing.setEnabled(False)  # Lock smoothing after marking starts
-            self.group_analysis.setEnabled(is_interactive)
-            self.frame_slider.setEnabled(is_interactive)
-            self.btn_select_folder.setEnabled(False)
-
-            main_action_text = "Confirm Points"
-            main_action_enabled = len(self.path_points_info) >= 2
-
-            if len(self.path_points_info) == 0:
-                info_text = "Click on the image to mark the starting point of the vessel."
-            elif len(self.path_points_info) == 1 and not self.active_thread:
-                info_text = "Start point set. Pre-analysis complete. Please mark your end point."
-            else:
-                info_text = f"Marked {len(self.path_points_info)} points. Click 'Confirm Points' when done."
-
-        elif self.app_state == AppState.RANGE_CONFIRMED:
-            self.group_smoothing.setEnabled(False)
-            self.group_analysis.setEnabled(is_interactive)
-            self.group_tools.setEnabled(is_interactive)
-            self.btn_select_folder.setEnabled(False)
-
-            main_action_text = "Run Full Analysis"
-            main_action_enabled = True
-            info_text = "Points confirmed. Draw noise areas or run the full analysis."
-            if self.drawing_mode == DrawingMode.NOISE_ROI:
-                info_text = "Drag on the image to draw a noise area to exclude."
-
-        elif self.app_state == AppState.PROCESSING:
-            status_text = "Processing..."
-            main_action_text = "Processing..."
-            if not self.path_points_info:
-                info_text = "First point marked. Running background pre-analysis of vessel structure..."
-            else:
-                info_text = "Running full analysis, please wait..."
-
-        elif self.app_state == AppState.DONE:
-            self.group_tools.setEnabled(is_interactive)
-            self.btn_select_folder.setEnabled(False)
-            main_action_text = "Analysis Complete"
-            info_text = "Path analysis is complete! View the steps or Reset to start over."
-            status_text = "Done"
-
-        self.btn_main_action.setText(main_action_text)
-        self.btn_main_action.setEnabled(main_action_enabled and is_interactive)
-        self.info_label.setText(info_text)
-        self.statusBar().showMessage(status_text)
+        if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
+            self.info_label.setText("Drag the mouse on the image to draw a noise area to exclude.")
 
     def keyPressEvent(self, event):
         """Handles keyboard events for frame navigation.
@@ -1410,19 +1292,14 @@ class VesselTracerApp(QMainWindow):
             self.app_state = AppState.LOADED
             self.update_ui_for_state()
 
-    def smoothing_slider_changed(self, value: int):
-        """Slot for the smoothing slider's valueChanged signal."""
-        self.smoothing_level = value
-        self.smoothing_slider_label.setText(f"Smoothing: {self.smoothing_level}")
-        # When the slider changes, we must clear old mask data
-        self.vessel_masks = None
-        self.base_mask_projection = None
-        # And update the display to show the new smoothing level
-        self.update_frame_display(self.current_frame_index)
+    def slider_value_changed(self, value: int):
+        """Slot for the frame slider's valueChanged signal.
 
-    def frame_slider_changed(self, value: int):
-        """Slot for the frame slider's valueChanged signal."""
+        Args:
+            value: The new slider value (frame index).
+        """
         self.update_frame_display(value)
+        self.update_ui_for_state()
 
     def update_frame_display(self, frame_index: int):
         """Updates the main image display to show a specific frame.
@@ -1437,15 +1314,7 @@ class VesselTracerApp(QMainWindow):
         self.frame_info_label.setText(f"Frame: {frame_index + 1}/{len(self.images)}")
 
         base_img = self.images[frame_index].copy()
-
-        # Apply live smoothing if the level is set
-        if self.smoothing_level > 0:
-            kernel_size = self.smoothing_level * 2 + 1
-            processed_img = cv2.GaussianBlur(base_img, (kernel_size, kernel_size), 0)
-        else:
-            processed_img = base_img
-
-        display_img = self.get_overlayed_display_image(processed_img, frame_index)
+        display_img = self.get_overlayed_display_image(base_img, frame_index)
         self.display_image(display_img)
 
     def draw_path_points_on_image(self, image_bgr: np.ndarray, frame_index: int, detailed_color: bool) -> np.ndarray:
@@ -1560,11 +1429,7 @@ class VesselTracerApp(QMainWindow):
             QMessageBox.warning(self, "Pre-analysis Failed", error_msg)
             # Clear the bad start point
             self.path_points_info = []
-<<<<<<< HEAD
-            self.app_state = AppState.MARKING_PATH  # Return to marking state
-=======
             self.app_state = AppState.MARKING_PATH # Return to marking state
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             self.update_ui_for_state()
             return
 
@@ -1583,10 +1448,7 @@ class VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
         self.info_label.setText("Start point set. Pre-analysis complete. Please mark your end point.")
         self.update_frame_display(self.current_frame_index)
-<<<<<<< HEAD
-=======
 
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 
     def _get_frame_range(self, for_processing: bool = False) -> Optional[Tuple[int, int]]:
         """Gets the frame range defined by the earliest and latest marked points.
@@ -1621,14 +1483,43 @@ class VesselTracerApp(QMainWindow):
 
         range_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
         if range_pip is not None:
-            img_with_overlays = self.get_overlayed_display_image(range_pip,
-                                                                 -1)  # -1 means don't highlight points from any specific frame
+            img_with_overlays = self.get_overlayed_display_image(range_pip, -1)  # -1 means don't highlight points from any specific frame
             self.display_image(img_with_overlays)
 
     def add_noise_roi_mode(self):
         """Enters the mode for drawing noise ROIs on the image."""
         self.drawing_mode = DrawingMode.NOISE_ROI
         self.update_ui_for_state()
+
+    def open_smoothing_preview(self):
+        """Opens the smoothing preview dialog to adjust the smoothing level."""
+        if self.app_state != AppState.RANGE_CONFIRMED:
+            return
+
+        frame_range = self._get_frame_range(for_processing=False)  # For UI preview, show user-selected range
+        if not frame_range:
+            QMessageBox.warning(self, "Error", "Please mark points first to define a preview range.")
+            return
+        start_f, end_f = frame_range
+        pip_image = create_maximum_intensity_projection(self.images[start_f:end_f + 1])
+
+        if pip_image is None:
+            QMessageBox.warning(self, "Error", "Could not create a preview image.")
+            return
+
+        dialog = SmoothingPreviewDialog(pip_image, self.smoothing_level, self)
+        if dialog.exec_() == QDialog.Accepted:
+            new_level = dialog.smoothing_level
+            if new_level != self.smoothing_level:
+                self.smoothing_level = new_level
+                # Clear cached mask data as smoothing parameter has changed
+                self.vessel_masks = None
+                self.base_mask_projection = None
+                self.temporal_cost_map = None
+                self.layered_vessel_mask = None
+                self.vessel_identity_map = None
+                self.statusBar().showMessage(f"Smoothing level set to: {self.smoothing_level}")
+                self.update_ui_for_state()
 
     def handle_roi_drawn(self, roi: QRect):
         """Handles the completion of an ROI drawing from the ImageLabel.
@@ -1671,20 +1562,12 @@ class VesselTracerApp(QMainWindow):
         updater = ProgressUpdater(progress)
 
         was_successful = self.prepare_and_generate_masks(worker_thread=updater)
-<<<<<<< HEAD
-        progress.close()  # Ensure dialog is closed regardless of outcome
-=======
         progress.close() # Ensure dialog is closed regardless of outcome
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 
         if was_successful:
             self.display_image(self.overlay_points_on_image(self.base_mask_projection))
             self.statusBar().showMessage("Vessel mask generated and displayed.")
-<<<<<<< HEAD
-        elif updater.is_running:  # Don't show error if user canceled
-=======
         elif updater.is_running: # Don't show error if user canceled
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             QMessageBox.warning(self, "Error", "Failed to generate vessel mask.")
 
     def prepare_and_generate_masks(self, worker_thread: Optional['ProgressUpdater'] = None) -> bool:
@@ -1713,8 +1596,7 @@ class VesselTracerApp(QMainWindow):
         if masks and (worker_thread is None or worker_thread.is_running):
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
-            self.main_vessel_mask = identify_main_vessels(self.base_mask_projection,
-                                                          self.MAIN_VESSEL_THICKNESS_THRESHOLD)
+            self.main_vessel_mask = identify_main_vessels(self.base_mask_projection, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
             self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.PATHFINDING_OBSTACLE_COST)
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, self.main_vessel_mask)
             return True
@@ -1824,13 +1706,7 @@ class VesselTracerApp(QMainWindow):
             # This is a user-facing action, so create a progress dialog.
             frame_range = self._get_frame_range(for_processing=True)
             if not frame_range:
-<<<<<<< HEAD
-                self.app_state = AppState.RANGE_CONFIRMED;
-                self.update_ui_for_state();
-                return
-=======
                 self.app_state = AppState.RANGE_CONFIRMED; self.update_ui_for_state(); return
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             num_images = frame_range[1] - frame_range[0] + 1
 
             progress = QProgressDialog("Generating vessel masks for analysis...", "Cancel", 0, num_images, self)
@@ -1841,14 +1717,8 @@ class VesselTracerApp(QMainWindow):
             progress.close()
 
             if not was_successful:
-<<<<<<< HEAD
-                if updater.is_running:  # Don't show error if user canceled
-                    QMessageBox.warning(self, "Analysis Aborted",
-                                        "Failed to generate vessel mask. Cannot continue analysis.")
-=======
                 if updater.is_running: # Don't show error if user canceled
                     QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
->>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
                 self.app_state = AppState.RANGE_CONFIRMED
                 self.update_ui_for_state()
                 return
@@ -1988,6 +1858,7 @@ class VesselTracerApp(QMainWindow):
                 identity_heatmap[self.vessel_identity_map == 0] = [0, 0, 0]  # Set background to black
                 steps.append((self.convert_np_to_pixmap(identity_heatmap), "Vessel Identity Map (Memory)"))
 
+
         # 2. Cost Map Heatmap
         display_costmap = pathfinding_costmap.copy()
         valid_pixels = display_costmap < self.PATHFINDING_OBSTACLE_COST
@@ -2030,13 +1901,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map,
-                                           self.path_coherence_map, viz_callback=None)
+            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, self.path_coherence_map, viz_callback=None)
 
             if segment is None:
                 # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map,
-                                               self.path_coherence_map,
+                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, self.path_coherence_map,
                                                viz_callback=None)
 
             if segment is None:
@@ -2072,8 +1941,7 @@ class VesselTracerApp(QMainWindow):
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
                      "baseimage": path_base_image, "identity_map": self.vessel_identity_map,
                      "coherence_map": self.path_coherence_map}
-        steps.append(
-            (self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
+        steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
         self.generate_final_path_image(base_original_pip)
@@ -2173,6 +2041,7 @@ class VesselTracerApp(QMainWindow):
             if viz_callback and node_counter % viz_interval == 0:
                 viz_callback(list(g_costs.keys()))
 
+
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
                     if dr == 0 and dc == 0: continue
@@ -2185,7 +2054,7 @@ class VesselTracerApp(QMainWindow):
 
                     # --- Cost Calculation ---
                     # 1. Base movement cost
-                    move_cost = np.sqrt(dr ** 2 + dc ** 2)
+                    move_cost = np.sqrt(dr**2 + dc**2)
 
                     # 2. Temporal cost from pre-calculated map
                     time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
@@ -2216,8 +2085,7 @@ class VesselTracerApp(QMainWindow):
                             cosine_similarity = min(1.0, max(-1.0, dot / (mag_in * mag_out)))
                             turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
 
-                    new_g_cost = g_costs[
-                                     current] + move_cost + time_cost + cross_vessel_penalty + coherence_cost + turn_penalty
+                    new_g_cost = g_costs[current] + move_cost + time_cost + cross_vessel_penalty + coherence_cost + turn_penalty
 
                     if new_g_cost < g_costs.get(neighbor, np.inf):
                         g_costs[neighbor] = new_g_cost
