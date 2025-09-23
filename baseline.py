@@ -354,7 +354,7 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
-def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
+def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, main_vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
     """Generates a map where each pixel's value represents path coherence from a start node.
 
     This is done using a Dijkstra-like search where the 'cost' is a measure of
@@ -364,6 +364,7 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
     Args:
         start_node: The (y, x) starting point for the exploration.
         vessel_mask: The binary mask of all vessels.
+        main_vessel_mask: A binary mask identifying the thickest "trunk" vessels.
         original_mip: The original MIP image, used for brightness checks.
         app_instance: The main application instance to access parameters.
 
@@ -414,7 +415,11 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
                 color_diff = abs(int(original_mip[current]) - int(original_mip[neighbor]))
                 incoherence += app_instance.COHERENCE_COLOR_CHANGE_PENALTY * (color_diff / 255.0)
 
-                # 3. Movement cost
+                # 3. Main vessel bonus (cost reduction)
+                if main_vessel_mask[neighbor] > 0:
+                    incoherence -= app_instance.COHERENCE_MAIN_VESSEL_BONUS
+
+                # 4. Movement cost
                 move_cost = math.sqrt(dr**2 + dc**2)
 
                 new_cost = costs[current] + move_cost + incoherence
@@ -578,7 +583,7 @@ class AnalysisWorker(QThread):
             return
 
         full_range_mip = create_maximum_intensity_projection(self.app.images)
-        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, full_range_mip, self.app)
+        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, self.app.main_vessel_mask, full_range_mip, self.app)
 
         results["success"] = True
         results["coherence_map"] = coherence_map
@@ -999,6 +1004,7 @@ class VesselTracerApp(QMainWindow):
     COHERENCE_TURN_PENALTY = 5.0
     COHERENCE_COLOR_CHANGE_PENALTY = 10.0
     COHERENCE_MAP_WEIGHT = 50.0
+    COHERENCE_MAIN_VESSEL_BONUS = 20.0
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
