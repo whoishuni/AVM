@@ -19,13 +19,15 @@ try:
     import cv2
     from skimage.morphology import skeletonize
     from skimage.filters import frangi, sato, meijering
+    import pyvista as pv
+    from pyvistaqt import QtInteractor
 except ImportError as e:
     # If a library is missing, create a simple QApplication to show an error message
     app = QApplication([])
     msg_box = QMessageBox()
     msg_box.setIcon(QMessageBox.Critical)
     msg_box.setText(f"Missing required Python library: {e.name}")
-    msg_box.setInformativeText("Please install it using: 'pip install numpy opencv-python scikit-image PyQt5 scikit-learn'")
+    msg_box.setInformativeText("Please install it using: 'pip install numpy opencv-python scikit-image PyQt5 scikit-learn pyvista pyvistaqt'")
     msg_box.setWindowTitle("Dependency Error")
     msg_box.exec_()
     sys.exit(1)
@@ -161,6 +163,38 @@ def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
                     cv2.line(bridged_mask, p1_xy, p2_xy, 255, 1)
 
     return bridged_mask
+
+
+def find_branch_points(mask: np.ndarray) -> List[Tuple[int, int]]:
+    """Finds points on a binary mask's skeleton that have more than two neighbors.
+
+    Args:
+        mask: The binary vessel mask (0 or 255).
+
+    Returns:
+        A list of (y, x) coordinates of the branch points.
+    """
+    if mask is None or np.sum(mask) == 0:
+        return []
+
+    skeleton = skeletonize(mask / 255).astype(np.uint8)
+    if np.sum(skeleton) == 0:
+        return []
+
+    # Use a convolution to count neighbors: a pixel value of 10 is added to the center
+    # so that the center pixel itself doesn't contribute to the neighbor count.
+    # A straight line point will have a value of 12 (10 + 1 + 1).
+    # An endpoint will have a value of 11 (10 + 1).
+    # A branch point will have a value of 13 or more (10 + 3+ neighbors).
+    kernel = np.array([[1, 1, 1], [1, 10, 1], [1, 1, 1]], dtype=np.uint8)
+    convolved = cv2.filter2D(skeleton, -1, kernel)
+
+    # Find points on the skeleton where the neighbor count is 3 or more
+    branch_points_map = np.zeros_like(skeleton)
+    branch_points_map[(convolved > 12) & (skeleton > 0)] = 255
+
+    branch_point_coords = np.argwhere(branch_points_map > 0)
+    return [tuple(coords) for coords in branch_point_coords]
 
 
 def remove_large_bright_areas(image: np.ndarray, bg_color: int, threshold_offset: int = 15,
@@ -432,6 +466,7 @@ class AppState(Enum):
     RANGE_CONFIRMED = auto()  # User has confirmed points, ready for configuration or analysis.
     PROCESSING = auto()       # Application is busy with a background task (e.g., mask generation).
     DONE = auto()             # Analysis is complete and results are shown.
+    PATH_SELECTION = auto()   # User can select one of the found paths.
 
 
 class DrawingMode(Enum):
@@ -455,6 +490,7 @@ class ImageLabel(QLabel):
                                 rectangular ROI, providing the QRect.
     """
     point_clicked = pyqtSignal(QPoint)
+    path_selected = pyqtSignal(list)
     roi_drawn = pyqtSignal(QRect)
 
     def __init__(self, parent: 'VesselTracerApp'):
@@ -533,16 +569,23 @@ class ImageLabel(QLabel):
             event: The QMouseEvent.
         """
         if event.button() == Qt.LeftButton:
+            image_coords = self.get_image_coords(event.pos())
+            if not image_coords:
+                return
+
             if self.main_window.app_state == AppState.MARKING_PATH:
-                image_coords = self.get_image_coords(event.pos())
-                if image_coords:
-                    self.point_clicked.emit(image_coords)
+                self.point_clicked.emit(image_coords)
+
+            elif self.main_window.app_state == AppState.PATH_SELECTION:
+                # Find which path was clicked
+                clicked_path = self.main_window.find_closest_path(image_coords)
+                if clicked_path:
+                    self.path_selected.emit(clicked_path)
+
             elif self.main_window.drawing_mode is not None:
-                start_pos = self.get_image_coords(event.pos())
-                if start_pos:
-                    self.is_drawing_roi = True
-                    self.current_drawing_roi = QRect(start_pos, start_pos)
-                    self.update()
+                self.is_drawing_roi = True
+                self.current_drawing_roi = QRect(image_coords, image_coords)
+                self.update()
 
     def mouseMoveEvent(self, event):
         """Handles mouse movement during ROI drawing to update the rectangle.
@@ -861,7 +904,10 @@ class VesselTracerApp(QMainWindow):
         self.noise_rois: List[QRect] = []
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
-        self.final_paths: Optional[List[List[Tuple[int, int]]]] = None
+        self.main_path: Optional[List[Tuple[int, int]]] = None
+        self.alternative_paths: List[List[Tuple[int, int]]] = []
+        self.selected_path: Optional[List[Tuple[int, int]]] = None
+        self.plotter: Optional[QtInteractor] = None
         self.final_path_image: Optional[np.ndarray] = None
         self.base_mask_projection: Optional[np.ndarray] = None
         self.temporal_cost_map: Optional[np.ndarray] = None
@@ -998,9 +1044,15 @@ class VesselTracerApp(QMainWindow):
         frame_nav_layout.addWidget(self.frame_info_label)
         self.layout.addLayout(frame_nav_layout)
 
-        # --- Image Display Area ---
+        # --- Main Display Area (2D and 3D views) ---
+        display_layout = QHBoxLayout()
         self.image_label = ImageLabel(self)
-        self.layout.addWidget(self.image_label, 1)  # Allow image area to take more space
+        display_layout.addWidget(self.image_label, 1)
+
+        # Add the 3D plotter
+        self.plotter = QtInteractor(self)
+        display_layout.addWidget(self.plotter.interactor, 1)
+        self.layout.addLayout(display_layout, 1)
 
         # --- Status/Info Label ---
         self.info_label = QLabel("Please load an image folder to begin.")
@@ -1031,6 +1083,69 @@ class VesselTracerApp(QMainWindow):
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
+        self.image_label.path_selected.connect(self.show_3d_view_for_path)
+
+    def show_3d_view_for_path(self, path: List[Tuple[int, int]]):
+        """Generates and displays the 3D visualization for a selected path."""
+        self.selected_path = path
+
+        self.statusBar().showMessage("Generating 3D view for selected path...", 3000)
+        QApplication.processEvents()
+
+        path_mesh = self.generate_3d_path_mesh(path)
+        volume_data = self.generate_3d_volume()
+
+        if path_mesh is None:
+            QMessageBox.critical(self, "Error", "Failed to generate the 3D path mesh.")
+            return
+
+        if not self.plotter:
+            return
+
+        self.plotter.clear()
+
+        self.plotter.add_mesh(path_mesh, color="lime", smooth_shading=True, line_width=5)
+
+        if volume_data:
+            self.plotter.add_volume(volume_data, cmap="bone", opacity="sigmoid", shade=True)
+
+        self.plotter.camera_position = 'iso'
+        self.plotter.reset_camera()
+        self.statusBar().showMessage("3D view generated.", 3000)
+        self.app_state = AppState.DONE
+        self.update_ui_for_state()
+
+    def generate_3d_volume(self) -> Optional[pv.UniformGrid]:
+        """Creates a 3D PyVista volume from the image sequence."""
+        if not self.images: return None
+        frame_range = self._get_frame_range(for_processing=True)
+        if not frame_range: return None
+        start_f, end_f = frame_range
+        images_subset = self.images[start_f : end_f + 1]
+        if not images_subset: return None
+        volume_array = np.stack(images_subset, axis=-1)
+        grid = pv.UniformGrid()
+        grid.dimensions = (volume_array.shape[1], volume_array.shape[0], volume_array.shape[2])
+        grid.origin = (0, 0, 0)
+        grid.spacing = (1, 1, 1) # Assuming voxel spacing is 1x1x1
+        grid.point_data['scalars'] = volume_array.flatten(order='F')
+        return grid
+
+    def generate_3d_path_mesh(self, path: List[Tuple[int, int]]) -> Optional[pv.DataSet]:
+        """Creates a 3D PyVista mesh (tube) from the calculated path."""
+        if not path or self.temporal_cost_map is None:
+            return None
+
+        points_3d = []
+        for y, x in path:
+            z = self.temporal_cost_map[y, x]
+            points_3d.append([x, y, z])
+
+        if not points_3d: return None
+
+        line = pv.PolyData(np.array(points_3d))
+        tube = line.tube(radius=3, n_sides=12)
+        return tube
 
     def update_ui_for_state(self):
         """Updates the UI element states (text, enabled/disabled) based on the current AppState."""
@@ -1071,6 +1186,12 @@ class VesselTracerApp(QMainWindow):
                 "info_text": "Path analysis is complete! Reset to start a new analysis.",
                 "status_text": "Done",
                 "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False
+            },
+            AppState.PATH_SELECTION: {
+                "main_action_text": "Select a Path", "main_action_enabled": False,
+                "info_text": "Analysis complete. Click on a path (Green=Main, Yellow=Alternative) to view it in 3D.",
+                "status_text": "Ready for path selection.",
+                "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False
             }
         }
 
@@ -1682,9 +1803,9 @@ class VesselTracerApp(QMainWindow):
 
             full_path.extend(segment if i == 0 else segment[1:])
 
-        self.final_paths = [full_path] if path_found_for_all_segments and full_path else []
+        self.main_path = full_path if path_found_for_all_segments and full_path else None
 
-        if not self.final_paths:
+        if not self.main_path:
             QMessageBox.warning(self, "Pathfinding Failed",
                                 "Could not find a continuous path between all marked points.\n\n"
                                 "<b>Recommended Actions:</b>\n"
@@ -1701,10 +1822,21 @@ class VesselTracerApp(QMainWindow):
             self.info_label.setText("Pathfinding failed. Please adjust parameters and try again.")
             return
 
+        # --- Find and add alternative paths ---
+        end_node = mask_pixels[-1]
+        self.find_alternative_paths(self.main_path, final_mask, pathfinding_costmap, self.vessel_identity_map, end_node)
+
         # 4. Display Path Search Result
-        path_points_yx = np.array(full_path, dtype=np.int32).reshape(-1, 1, 2)
+        # Draw main path
+        path_points_yx = np.array(self.main_path, dtype=np.int32).reshape(-1, 1, 2)
         path_points_xy = path_points_yx[:, :, ::-1]
         cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
+
+        # Draw alternative paths
+        for alt_path in self.alternative_paths:
+            alt_points_yx = np.array(alt_path, dtype=np.int32).reshape(-1, 1, 2)
+            alt_points_xy = alt_points_yx[:, :, ::-1]
+            cv2.polylines(exploration_img, [alt_points_xy], isClosed=False, color=(50, 255, 255), thickness=2) # Yellow
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
                      "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
@@ -1717,9 +1849,13 @@ class VesselTracerApp(QMainWindow):
         dialog = StepViewerDialog(steps, self)
         dialog.exec_()
 
-        self.display_image(self.final_path_image)
-        self.app_state = AppState.DONE
+        self.display_image(exploration_img) # Display the image with all paths
+        self.app_state = AppState.PATH_SELECTION
         self.update_ui_for_state()
+
+        # We skip the rest of the step viewer for now as the user will interactively select a path
+        # For a full implementation, you might show the step viewer first, then go to selection state.
+
 
     def generate_final_path_image(self, base_original_pip: np.ndarray):
         """Generates the final result image with the path drawn on the original MIP.
@@ -1733,9 +1869,10 @@ class VesselTracerApp(QMainWindow):
             # Use the original MIP directly without histogram equalization for a more authentic look
             self.final_path_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
 
-        if not self.final_paths or not self.final_paths[0]: return
+        if not self.main_path: return
 
-        path = self.final_paths[0]
+        # Draw main path
+        path = self.main_path
         path_points_yx = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
         path_points_xy = path_points_yx[:, :, ::-1]
 
@@ -1853,6 +1990,79 @@ class VesselTracerApp(QMainWindow):
 
         return None
 
+    def find_alternative_paths(self, main_path, mask, cost_map, identity_map, end_node):
+        """Finds complete alternative routes that branch off the main path and reach the destination."""
+        self.alternative_paths = []
+        branch_points = find_branch_points(mask)
+        main_path_set = set(main_path)
+
+        # Find branch points that are actually on our main path
+        path_branch_points = [p for p in branch_points if p in main_path_set]
+
+        for branch_point in path_branch_points:
+            # Create a cost map that penalizes the main path *after* this branch point
+            temp_cost_map = cost_map.copy()
+            try:
+                branch_index = main_path.index(branch_point)
+                for i in range(branch_index, len(main_path)):
+                    temp_cost_map[main_path[i]] = self.PATHFINDING_OBSTACLE_COST
+            except ValueError:
+                continue
+
+            # For each branch, find neighbors that are on the mask but not on the main path
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0: continue
+
+                    neighbor = (branch_point[0] + dr, branch_point[1] + dc)
+
+                    if not (0 <= neighbor[0] < mask.shape[0] and 0 <= neighbor[1] < mask.shape[1]):
+                        continue
+
+                    is_on_mask = mask[neighbor] > 0
+                    is_on_main_path = neighbor in main_path_set
+
+                    if is_on_mask and not is_on_main_path:
+                        start_node = neighbor
+                        alt_segment = self.find_path_astar(temp_cost_map, start_node, end_node, identity_map)
+
+                        if alt_segment:
+                            path_prefix = main_path[:branch_index+1]
+                            full_alt_path = path_prefix + alt_segment
+                            self.alternative_paths.append(full_alt_path)
+
+
+    def find_closest_path(self, point: QPoint, max_dist: int = 10) -> Optional[List[Tuple[int, int]]]:
+        """Finds the closest path to a given point from the list of all found paths.
+
+        Args:
+            point: The QPoint (in image coordinates) of the click.
+            max_dist: The maximum distance in pixels to consider a path "clicked".
+
+        Returns:
+            The path (a list of coordinates) that is closest to the point, or None.
+        """
+        all_paths = ([self.main_path] if self.main_path else []) + self.alternative_paths
+        if not all_paths:
+            return None
+
+        click_coords = np.array([point.y(), point.x()])
+        min_dist = float('inf')
+        closest_path = None
+
+        for path in all_paths:
+            path_points = np.array(path)
+            distances = np.linalg.norm(path_points - click_coords, axis=1)
+            current_min_dist = np.min(distances)
+
+            if current_min_dist < min_dist:
+                min_dist = current_min_dist
+                closest_path = path
+
+        if min_dist <= max_dist:
+            return closest_path
+        return None
+
     def find_closest_pixel_on_mask(self, point: QPoint, mask_img: np.ndarray) -> Optional[Tuple[int, int]]:
         """Finds the closest white pixel on a binary mask to a given point.
 
@@ -1889,7 +2099,11 @@ class VesselTracerApp(QMainWindow):
         self.vessel_identity_map = None
         self.noise_rois = []
         self.drawing_mode = None
-        self.final_paths = None
+        self.main_path = None
+        self.alternative_paths = []
+        self.selected_path = None
+        if self.plotter:
+            self.plotter.clear()
         self.final_path_image = None
         self.base_mask_projection = None
         self.temporal_cost_map = None
