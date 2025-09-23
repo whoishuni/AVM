@@ -422,6 +422,114 @@ def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
     return identity_map
 
 
+def build_vessel_graph(skeleton_img: np.ndarray) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, int]]], Dict[Tuple[int, int], List[Tuple[int, int]]]]:
+    """
+    Builds a graph representation from a skeletonized image of a vessel network.
+
+    Args:
+        skeleton_img: A binary, 1-pixel wide skeleton image (values 0 or 255).
+
+    Returns:
+        A tuple containing:
+        - graph: A dictionary where keys are node coordinates (endpoints or junctions)
+                 and values are lists of connected node coordinates.
+        - paths: A dictionary where keys are sorted tuples of two connected node
+                 coordinates (an edge) and values are the list of pixel coordinates
+                 forming the path between them.
+    """
+    if skeleton_img is None or skeleton_img.size == 0:
+        return {}, {}
+
+    # Find all junction and end points in the skeleton
+    kernel = np.array([[1, 1, 1], [1, 10, 1], [1, 1, 1]], dtype=np.uint8)
+    convolved = cv2.filter2D(skeleton_img, -1, kernel)
+
+    # Junctions are skeleton pixels with > 2 neighbors (value > 12)
+    # Endpoints are skeleton pixels with 1 neighbor (value == 11)
+    node_pts_yx = np.argwhere((convolved > 12) | (convolved == 11))
+    node_pts = {tuple(p) for p in node_pts_yx}
+
+    graph = {tuple(p): [] for p in node_pts}
+    paths = {}
+    visited_pixels = set()
+
+    for start_node in node_pts:
+        if start_node in visited_pixels:
+            continue
+
+        # Start a traversal from each neighbor of the current node
+        y, x = start_node
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dy == 0 and dx == 0:
+                    continue
+
+                ny, nx = y + dy, x + dx
+                neighbor = (ny, nx)
+
+                if not (0 <= ny < skeleton_img.shape[0] and 0 <= nx < skeleton_img.shape[1]):
+                    continue
+
+                if skeleton_img[neighbor] > 0 and neighbor not in visited_pixels:
+                    path, end_node = _trace_path(skeleton_img, neighbor, node_pts, start_node)
+
+                    if end_node and start_node != end_node:
+                        # Add edge to graph
+                        graph[start_node].append(end_node)
+                        graph[end_node].append(start_node)
+
+                        # Store path
+                        edge = tuple(sorted((start_node, end_node)))
+                        paths[edge] = [start_node] + path
+
+                        # Mark entire path as visited
+                        for p in path:
+                            visited_pixels.add(p)
+
+        visited_pixels.add(start_node)
+
+    return graph, paths
+
+def _trace_path(skeleton_img: np.ndarray, start_pixel: Tuple[int, int], node_pts: set,
+                start_node: Tuple[int, int]) -> Tuple[List[Tuple[int, int]], Optional[Tuple[int, int]]]:
+    """Traces a path along the skeleton from a starting pixel until a node is hit."""
+    path = [start_pixel]
+    prev_pixel = start_node
+    current_pixel = start_pixel
+
+    while True:
+        y, x = current_pixel
+        found_next = False
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dy == 0 and dx == 0:
+                    continue
+
+                ny, nx = y + dy, x + dx
+                next_pixel = (ny, nx)
+
+                if not (0 <= ny < skeleton_img.shape[0] and 0 <= nx < skeleton_img.shape[1]):
+                    continue
+
+                if skeleton_img[next_pixel] > 0 and next_pixel != prev_pixel:
+                    if next_pixel in node_pts:
+                        # Found the end of the path
+                        path.append(next_pixel)
+                        return path, next_pixel
+
+                    path.append(next_pixel)
+                    prev_pixel = current_pixel
+                    current_pixel = next_pixel
+                    found_next = True
+                    break
+            if found_next:
+                break
+
+        if not found_next:
+            # Path dead-ends without finding a node (should be rare in clean skeletons)
+            return [], None
+
+
 # --- State Management Enums ---
 
 class AppState(Enum):
@@ -843,6 +951,7 @@ class VesselTracerApp(QMainWindow):
     TIME_COST_WEIGHT = 1.0
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
+    AVM_TURN_PREFERENCE_WEIGHT = 100.0  # Added: AVM turn preference weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
 
     def __init__(self):
@@ -1528,6 +1637,7 @@ class VesselTracerApp(QMainWindow):
         pathfinding_costmap[final_mask > 0] = 0  # Base cost is 0
         pathfinding_costmap += cost_map  # Add time cost
 
+        # Directly call the full analysis steps viewer
         self.show_full_analysis_steps(final_mask, mask_pixels, pathfinding_costmap)
 
     def replay_path_animation(self, anim_data: dict):
@@ -1641,77 +1751,57 @@ class VesselTracerApp(QMainWindow):
                 steps.append((self.convert_np_to_pixmap(heatmap), "Temporal Cost Map (Blue = Lower Cost)"))
 
         # 3. Marked Points and Path Search Animation
-        path_base_image = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
-        for i, p in enumerate(mask_pixels):
-            color = (0, 255, 255)  # Yellow
-            if i == 0:
-                color = (0, 0, 255)  # Red
-            elif i == len(mask_pixels) - 1:
-                color = (255, 100, 0)  # Blue
-            cv2.circle(path_base_image, (p[1], p[0]), 5, color, -1)
-        steps.append((self.convert_np_to_pixmap(path_base_image), "Located Marked Points on Mask"))
-
-        self.statusBar().showMessage("Executing pathfinding...", 5000)
+        # --- NEW GRAPH-BASED AVM PATHFINDING ---
+        self.statusBar().showMessage("Building vessel graph...", 5000)
         QApplication.processEvents()
 
-        exploration_img = path_base_image.copy()
+        skeleton = skeletonize(final_mask / 255).astype(np.uint8) * 255
+        graph, edge_paths = build_vessel_graph(skeleton)
 
-        full_path = []
-        path_found_for_all_segments = True
-        for i in range(len(mask_pixels) - 1):
-            start_node = mask_pixels[i]
-            end_node = mask_pixels[i + 1]
+        if not graph:
+            QMessageBox.warning(self, "Graph Error", "Could not build a vessel graph from the mask. The structure might be too fragmented.")
+            self.app_state = AppState.RANGE_CONFIRMED
+            self.update_ui_for_state()
+            return
 
-            current_costmap = pathfinding_costmap.copy()
-            if i > 0:
-                prev_node = mask_pixels[i - 1]
-                cv2.circle(current_costmap, (prev_node[1], prev_node[0]), self.FORBIDDEN_ZONE_RADIUS,
-                           self.PATHFINDING_OBSTACLE_COST, -1)
+        # Visualize the graph for debugging
+        graph_viz = cv2.cvtColor(skeleton, cv2.COLOR_GRAY2BGR)
+        for node in graph.keys():
+            cv2.circle(graph_viz, (node[1], node[0]), 5, (0, 0, 255), -1) # Nodes in red
+        steps.append((self.convert_np_to_pixmap(graph_viz), "Vessel Skeleton & Graph Nodes"))
 
-            # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, viz_callback=None)
+        # Find the graph nodes closest to the user's clicks
+        graph_nodes_list = list(graph.keys())
+        start_node = self.find_closest_node_on_graph(self.path_points_info[0]["point"], graph_nodes_list)
+        end_node = self.find_closest_node_on_graph(self.path_points_info[-1]["point"], graph_nodes_list)
 
-            if segment is None:
-                # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map,
-                                               viz_callback=None)
+        if not start_node or not end_node or start_node == end_node:
+             QMessageBox.warning(self, "Pathfinding Error", "Could not map start/end points to the vessel graph. Please mark points closer to vessel centers or junctions.")
+             self.app_state = AppState.RANGE_CONFIRMED
+             self.update_ui_for_state()
+             return
 
-            if segment is None:
-                path_found_for_all_segments = False
-                break
+        self.statusBar().showMessage("Executing AVM pathfinding...", 5000)
+        QApplication.processEvents()
 
-            full_path.extend(segment if i == 0 else segment[1:])
-
-        self.final_paths = [full_path] if path_found_for_all_segments and full_path else []
+        # The new core pathfinding call
+        found_paths = self.find_avm_paths(start_node, end_node, graph, edge_paths)
+        self.final_paths = found_paths if found_paths else []
 
         if not self.final_paths:
             QMessageBox.warning(self, "Pathfinding Failed",
-                                "Could not find a continuous path between all marked points.\n\n"
-                                "<b>Recommended Actions:</b>\n"
-                                "1. <b>Adjust Smoothing</b>: Change this in 'Mark & Configure' to alter mask connectivity.\n"
-                                "2. <b>Use Noise Areas</b>: If there's background interference, use 'Draw Noise Area' to exclude it.\n"
-                                "3. <b>Check Marked Points</b>: Ensure points are within clear vessel structures.")
-
-            path_img = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
-            steps.append((self.convert_np_to_pixmap(path_img), "Pathfinding Failed"))
-            dialog = StepViewerDialog(steps, self)
-            dialog.exec_()
+                                "Could not find any continuous path between the start and end points using the graph method.")
             self.app_state = AppState.RANGE_CONFIRMED
             self.update_ui_for_state()
-            self.info_label.setText("Pathfinding failed. Please adjust parameters and try again.")
             return
 
         # 4. Display Path Search Result
-        path_points_yx = np.array(full_path, dtype=np.int32).reshape(-1, 1, 2)
-        path_points_xy = path_points_yx[:, :, ::-1]
-        cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
-
-        anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
-                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
-        steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
+        exploration_img = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
+        # We will draw the paths in the final step generation
 
         # 5. Final Result
         self.generate_final_path_image(base_original_pip)
+        # The generate_final_path_image function now handles drawing multiple paths
         steps.append((self.convert_np_to_pixmap(self.final_path_image), "Final Result"))
 
         dialog = StepViewerDialog(steps, self)
@@ -1720,6 +1810,84 @@ class VesselTracerApp(QMainWindow):
         self.display_image(self.final_path_image)
         self.app_state = AppState.DONE
         self.update_ui_for_state()
+
+    def _calculate_angle(self, v1, v2):
+        """Calculates the angle in degrees between two vectors."""
+        dot = v1[0] * v2[0] + v1[1] * v2[1]
+        det = v1[0] * v2[1] - v1[1] * v2[0]
+        angle_rad = math.atan2(det, dot)
+        return np.degrees(angle_rad)
+
+    def find_avm_paths(self, start_node, end_node, graph, edge_paths):
+        """
+        Finds all possible paths from a start to an end node in the vessel graph,
+        applying AVM-specific heuristics.
+        """
+        all_paths = []
+
+        def _search_recursive(current_node, current_path_nodes, visited_edges):
+            if current_node == end_node:
+                all_paths.append(list(current_path_nodes))
+                return
+
+            neighbors = graph.get(current_node, [])
+            for neighbor in neighbors:
+                edge = tuple(sorted((current_node, neighbor)))
+                if edge not in visited_edges:
+                    new_visited_edges = visited_edges.copy()
+                    new_visited_edges.add(edge)
+                    current_path_nodes.append(neighbor)
+                    _search_recursive(neighbor, current_path_nodes, new_visited_edges)
+                    current_path_nodes.pop() # Backtrack
+
+        _search_recursive(start_node, [start_node], set())
+
+        # Reconstruct pixel paths and calculate scores
+        final_paths_with_scores = []
+        for node_path in all_paths:
+            pixel_path = []
+            total_score = 0
+            for i in range(len(node_path) - 1):
+                u, v = node_path[i], node_path[i+1]
+                edge = tuple(sorted((u, v)))
+                segment = edge_paths.get(edge, [])
+
+                # Ensure segment is in correct order
+                if segment and segment[0] != u:
+                    segment = segment[::-1]
+
+                if i == 0:
+                    pixel_path.extend(segment)
+                else:
+                    pixel_path.extend(segment[1:])
+
+                # Calculate turn score at junctions
+                if i > 0:
+                    prev_u, prev_v = node_path[i-1], node_path[i]
+                    # Check if prev_v is a junction
+                    if len(graph.get(prev_v, [])) > 2:
+                        # Vector of incoming segment
+                        p_start = np.array(prev_u)
+                        p_mid = np.array(prev_v)
+                        # Vector of outgoing segment
+                        p_end = np.array(v)
+
+                        v_in = p_mid - p_start
+                        v_out = p_end - p_mid
+
+                        angle = self._calculate_angle(v_in, v_out)
+                        # Score is higher for sharper turns. abs() makes left/right turns equal.
+                        score = abs(angle) * self.AVM_TURN_PREFERENCE_WEIGHT
+                        total_score += score
+
+            if pixel_path:
+                final_paths_with_scores.append({'path': pixel_path, 'score': total_score})
+
+        # Sort paths by score, ascending. Lower score (straighter path) is now considered better as per review feedback.
+        final_paths_with_scores.sort(key=lambda p: p['score'])
+
+        return [p['path'] for p in final_paths_with_scores]
+
 
     def generate_final_path_image(self, base_original_pip: np.ndarray):
         """Generates the final result image with the path drawn on the original MIP.
@@ -1733,15 +1901,31 @@ class VesselTracerApp(QMainWindow):
             # Use the original MIP directly without histogram equalization for a more authentic look
             self.final_path_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
 
-        if not self.final_paths or not self.final_paths[0]: return
+        if not self.final_paths: return
 
-        path = self.final_paths[0]
-        path_points_yx = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
-        path_points_xy = path_points_yx[:, :, ::-1]
+        # Define a list of colors for the paths. The first is the primary.
+        path_colors = [
+            (50, 255, 50),   # Bright Green (Primary)
+            (50, 255, 255),  # Yellow
+            (255, 255, 50),  # Cyan
+            (255, 50, 255),  # Magenta
+        ]
 
-        # Draw the path (with a black border for visibility)
-        cv2.polylines(self.final_path_image, [path_points_xy], isClosed=False, color=(0, 0, 0), thickness=4)
-        cv2.polylines(self.final_path_image, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
+        # Draw all paths, with the primary one being thicker
+        for i, path in enumerate(self.final_paths):
+            if not path: continue
+
+            path_points_yx = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
+            path_points_xy = path_points_yx[:, :, ::-1]
+
+            color = path_colors[i % len(path_colors)]
+            is_primary = (i == 0)
+            thickness = 3 if is_primary else 2
+
+            # Draw a black border for better visibility
+            cv2.polylines(self.final_path_image, [path_points_xy], isClosed=False, color=(0, 0, 0), thickness=thickness + 2)
+            # Draw the colored path
+            cv2.polylines(self.final_path_image, [path_points_xy], isClosed=False, color=color, thickness=thickness)
 
         # Redraw marked points on top
         for i, p_info in enumerate(self.path_points_info):
@@ -1877,6 +2061,24 @@ class VesselTracerApp(QMainWindow):
 
         if distances[min_dist_idx] <= self.MAX_NODE_SEARCH_RADIUS:
             return tuple(valid_points[min_dist_idx])
+        else:
+            return None
+
+    def find_closest_node_on_graph(self, point: QPoint, graph_nodes: list) -> Optional[Tuple[int, int]]:
+        """Finds the closest node in the graph to a given point."""
+        if not graph_nodes:
+            return None
+
+        point_coords = np.array([point.y(), point.x()])
+        node_coords = np.array(graph_nodes)
+
+        distances = np.linalg.norm(node_coords - point_coords, axis=1)
+        min_dist_idx = np.argmin(distances)
+
+        # Unlike finding a pixel, we assume a node should be reasonably close.
+        # This threshold can be adjusted.
+        if distances[min_dist_idx] <= self.MAX_NODE_SEARCH_RADIUS * 2:
+            return tuple(graph_nodes[min_dist_idx])
         else:
             return None
 
