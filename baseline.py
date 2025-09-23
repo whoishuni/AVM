@@ -354,102 +354,6 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
-def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndarray) -> Optional[np.ndarray]:
-    """
-    Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
-
-    This function tracks vessel segments from frame to frame. If a segment in one frame
-    overlaps with a segment in the next, they are considered the same vessel and share
-    the same ID. This creates a "memory" of the vessel structure's growth.
-
-    A key feature is the natural branching rule: new, independent vessels are only
-    allowed to form if they originate from a pre-identified "main vessel" trunk.
-
-    Args:
-        masks: A list of binary vessel masks, one for each frame in the sequence.
-        main_vessel_mask: A binary mask identifying the thickest "trunk" vessels.
-
-    Returns:
-        An optional 2D NumPy array of the same dimensions as the input masks. Each
-        pixel corresponding to a vessel is assigned an integer ID unique to that
-        vessel structure across all frames. Returns None if the input is empty.
-    """
-    if not masks:
-        return None
-
-    h, w = masks[0].shape
-    identity_map = np.zeros((h, w), dtype=np.int32)
-    next_vessel_id = 1
-
-    # Process the first frame to initialize vessel identities
-    if np.any(masks[0]):
-        num_labels, labels = cv2.connectedComponents(masks[0])
-        for label_idx in range(1, num_labels): # Skip background label 0
-            component_mask = (labels == label_idx)
-            identity_map[component_mask] = next_vessel_id
-            next_vessel_id += 1
-
-    # Process subsequent frames
-    for i in range(1, len(masks)):
-        # Get the new components from the current frame that are not in the previous one
-        new_growth_mask = cv2.subtract(masks[i], masks[i-1])
-
-        if not np.any(new_growth_mask):
-            continue
-
-        num_labels, labels = cv2.connectedComponents(new_growth_mask)
-
-        for label_idx in range(1, num_labels):
-            component_mask = (labels == label_idx)
-
-            # To link a new component, we check its boundary against the existing identity map
-            kernel = np.ones((3,3), np.uint8)
-            eroded_component = cv2.erode(component_mask.astype(np.uint8), kernel, iterations=1)
-            boundary_mask = component_mask & ~eroded_component.astype(bool)
-
-            overlap_pixels = identity_map[boundary_mask]
-            overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
-
-            if len(overlapping_ids) > 0:
-                # This component is a continuation of an existing vessel.
-                unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
-                chosen_id = unique_ids[np.argmax(counts)]
-                identity_map[component_mask] = chosen_id
-            else:
-                # This is a new, disjoint vessel. Apply the natural branching rule.
-                # It's only a valid new branch if it originates from a main vessel trunk.
-                dilated_component = cv2.dilate(component_mask.astype(np.uint8), kernel, iterations=1)
-                if np.any((dilated_component > 0) & (main_vessel_mask > 0)):
-                    identity_map[component_mask] = next_vessel_id
-                    next_vessel_id += 1
-                # Otherwise, this component is considered noise and is not given an ID.
-
-    return identity_map
-
-
-def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndarray:
-    """Identifies main vessel trunks based on their thickness.
-
-    Args:
-        mask: A binary mask of the entire vessel structure.
-        thickness_threshold: The minimum radius a pixel must have to be
-                             considered part of a main vessel.
-
-    Returns:
-        A binary mask highlighting only the main vessels.
-    """
-    if mask is None or np.sum(mask) == 0:
-        return np.zeros_like(mask)
-
-    # Use distance transform to get the radius of the vessel at each point
-    dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-
-    # Threshold the distance map to find areas of sufficient thickness
-    _, main_vessels_mask = cv2.threshold(dist_transform, thickness_threshold, 255, cv2.THRESH_BINARY)
-
-    return main_vessels_mask.astype(np.uint8)
-
-
 def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
     """Generates a map where each pixel's value represents path coherence from a start node.
 
@@ -535,6 +439,100 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
     return coherence_map
 
 
+def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndarray:
+    """Identifies main vessel trunks based on their thickness.
+
+    Args:
+        mask: A binary mask of the entire vessel structure.
+        thickness_threshold: The minimum radius a pixel must have to be
+                             considered part of a main vessel.
+
+    Returns:
+        A binary mask highlighting only the main vessels.
+    """
+    if mask is None or np.sum(mask) == 0:
+        return np.zeros_like(mask)
+
+    # Use distance transform to get the radius of the vessel at each point
+    dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+
+    # Threshold the distance map to find areas of sufficient thickness
+    _, main_vessels_mask = cv2.threshold(dist_transform, thickness_threshold, 255, cv2.THRESH_BINARY)
+
+    return main_vessels_mask.astype(np.uint8)
+
+def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
+
+    This function tracks vessel segments from frame to frame. If a segment in one frame
+    overlaps with a segment in the next, they are considered the same vessel and share
+    the same ID. This creates a "memory" of the vessel structure's growth.
+
+    A key feature is the natural branching rule: new, independent vessels are only
+    allowed to form if they originate from a pre-identified "main vessel" trunk.
+
+    Args:
+        masks: A list of binary vessel masks, one for each frame in the sequence.
+        main_vessel_mask: A binary mask identifying the thickest "trunk" vessels.
+
+    Returns:
+        An optional 2D NumPy array of the same dimensions as the input masks. Each
+        pixel corresponding to a vessel is assigned an integer ID unique to that
+        vessel structure across all frames. Returns None if the input is empty.
+    """
+    if not masks:
+        return None
+
+    h, w = masks[0].shape
+    identity_map = np.zeros((h, w), dtype=np.int32)
+    next_vessel_id = 1
+
+    # Process the first frame to initialize vessel identities
+    if np.any(masks[0]):
+        num_labels, labels = cv2.connectedComponents(masks[0])
+        for label_idx in range(1, num_labels): # Skip background label 0
+            component_mask = (labels == label_idx)
+            identity_map[component_mask] = next_vessel_id
+            next_vessel_id += 1
+
+    # Process subsequent frames
+    for i in range(1, len(masks)):
+        # Get the new components from the current frame that are not in the previous one
+        new_growth_mask = cv2.subtract(masks[i], masks[i-1])
+
+        if not np.any(new_growth_mask):
+            continue
+
+        num_labels, labels = cv2.connectedComponents(new_growth_mask)
+
+        for label_idx in range(1, num_labels):
+            component_mask = (labels == label_idx)
+
+            # To link a new component, we check its boundary against the existing identity map
+            kernel = np.ones((3,3), np.uint8)
+            eroded_component = cv2.erode(component_mask.astype(np.uint8), kernel, iterations=1)
+            boundary_mask = component_mask & ~eroded_component.astype(bool)
+
+            overlap_pixels = identity_map[boundary_mask]
+            overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
+
+            if len(overlapping_ids) > 0:
+                # This component is a continuation of an existing vessel.
+                unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
+                chosen_id = unique_ids[np.argmax(counts)]
+                identity_map[component_mask] = chosen_id
+            else:
+                # This is a new, disjoint vessel. Apply the natural branching rule.
+                # It's only a valid new branch if it originates from a main vessel trunk.
+                dilated_component = cv2.dilate(component_mask.astype(np.uint8), kernel, iterations=1)
+                if np.any((dilated_component > 0) & (main_vessel_mask > 0)):
+                    identity_map[component_mask] = next_vessel_id
+                    next_vessel_id += 1
+                # Otherwise, this component is considered noise and is not given an ID.
+
+    return identity_map
+
 # --- State Management Enums ---
 
 class AppState(Enum):
@@ -550,6 +548,45 @@ class AppState(Enum):
 class DrawingMode(Enum):
     """Defines the available drawing modes for the user."""
     NOISE_ROI = auto()        # User is drawing a rectangle to define a noise area.
+
+
+class AnalysisWorker(QThread):
+    """A QThread worker for running analysis tasks in the background."""
+    analysis_complete = pyqtSignal(dict)
+
+    def __init__(self, app_instance, start_point):
+        super().__init__()
+        self.app = app_instance
+        self.start_point = start_point
+        self.is_running = True
+
+    def run(self):
+        """Runs the analysis pipeline."""
+        results = {"success": False}
+        # Call prepare_and_generate_masks without a worker_thread to prevent UI creation
+        if self.app.base_mask_projection is None:
+            # Pass worker_thread=None to prevent UI creation from background thread
+            if not self.app.prepare_and_generate_masks(worker_thread=None):
+                results["error"] = "Mask generation was canceled or failed during pre-analysis."
+                self.analysis_complete.emit(results)
+                return
+
+        start_node = self.app.find_closest_pixel_on_mask(self.start_point, self.app.base_mask_projection)
+        if not start_node:
+            results["error"] = "Point Not on Vessel"
+            self.analysis_complete.emit(results)
+            return
+
+        full_range_mip = create_maximum_intensity_projection(self.app.images)
+        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, full_range_mip, self.app)
+
+        results["success"] = True
+        results["coherence_map"] = coherence_map
+        results["start_node"] = start_node
+        self.analysis_complete.emit(results)
+
+    def stop(self):
+        self.is_running = False
 
 
 # --- PyQt5 Components ---
@@ -955,9 +992,9 @@ class VesselTracerApp(QMainWindow):
     FORBIDDEN_ZONE_RADIUS = 30
     TIME_COST_WEIGHT = 1.0
     PATHFINDING_OBSTACLE_COST = 1e9
-    TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
-    CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
-    MAIN_VESSEL_THICKNESS_THRESHOLD = 5 # Radius in pixels to be considered a main vessel
+    TURN_PENALTY_WEIGHT = 50.0
+    CROSS_VESSEL_PENALTY = 1e6
+    MAIN_VESSEL_THICKNESS_THRESHOLD = 5
     # --- Coherence Map Parameters ---
     COHERENCE_TURN_PENALTY = 5.0
     COHERENCE_COLOR_CHANGE_PENALTY = 10.0
@@ -976,8 +1013,8 @@ class VesselTracerApp(QMainWindow):
         self.vessel_masks: Optional[List[np.ndarray]] = None
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
-        self.main_vessel_mask: Optional[np.ndarray] = None # Added: Mask for main vessels
-        self.path_coherence_map: Optional[np.ndarray] = None # Added: Map of path coherence from start point
+        self.main_vessel_mask: Optional[np.ndarray] = None
+        self.path_coherence_map: Optional[np.ndarray] = None
         self.noise_rois: List[QRect] = []
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
@@ -1355,46 +1392,63 @@ class VesselTracerApp(QMainWindow):
     def handle_point_selection(self, point: QPoint):
         """Handles a point selection event from the ImageLabel.
 
-        If it's the first point, it triggers the coherence map pre-analysis.
-        Otherwise, it just adds the point to the list.
+        If it's the first point, it triggers the coherence map pre-analysis
+        in a background thread. Otherwise, it just adds the point to the list.
 
         Args:
             point: The QPoint where the user clicked, in image coordinates.
         """
-        if self.app_state != AppState.MARKING_PATH:
+        if self.app_state != AppState.MARKING_PATH or self.active_thread is not None:
             return
 
         # --- New Workflow: Pre-analysis on first point ---
         if not self.path_points_info:
-            # This is the first point (the start point).
-            # We need to generate the base masks first to find the real start node.
-            if self.base_mask_projection is None:
-                if not self.prepare_and_generate_masks():
-                    QMessageBox.warning(self, "Mask Generation Failed", "Could not generate a vessel mask. Cannot proceed.")
-                    return
+            self.app_state = AppState.PROCESSING
+            self.update_ui_for_state()
+            self.info_label.setText("First point marked. Running background pre-analysis of vessel structure...")
 
-            start_node = self.find_closest_pixel_on_mask(point, self.base_mask_projection)
-            if not start_node:
-                QMessageBox.warning(self, "Point Not on Vessel", "The selected start point is not close enough to a vessel.")
-                return
+            # Store the point temporarily so the worker can access it
+            self.path_points_info.append({"point": point, "frame": self.current_frame_index})
 
-            self.info_label.setText("Processing... generating coherence map from start point.")
-            QApplication.processEvents()
-
-            # For the coherence map, we need an original image MIP of the full range
-            full_range_mip = create_maximum_intensity_projection(self.images)
-            self.path_coherence_map = generate_path_coherence_map(start_node, self.base_mask_projection, full_range_mip, self)
-
-            # Now that pre-analysis is done, add the point and update UI
-            self.path_points_info.append({"point": point, "frame": self.current_frame_index, "node": start_node})
-            self.info_label.setText("Start point set. Pre-analysis complete. Please mark your end point.")
+            self.active_thread = AnalysisWorker(self, point)
+            self.active_thread.analysis_complete.connect(self.on_pre_analysis_complete)
+            self.active_thread.start()
         else:
             # This is a subsequent point (middle or end).
             self.path_points_info.append({"point": point, "frame": self.current_frame_index})
+            self.path_points_info.sort(key=lambda p: p['frame'])
+            self.update_frame_display(self.current_frame_index)
+            self.update_ui_for_state()
 
-        self.path_points_info.sort(key=lambda p: p['frame'])
-        self.update_frame_display(self.current_frame_index)
+    def on_pre_analysis_complete(self, results: dict):
+        """Handles the completion of the background pre-analysis task."""
+        self.active_thread = None
+
+        if not results.get("success"):
+            error_msg = results.get("error", "An unknown error occurred during pre-analysis.")
+            QMessageBox.warning(self, "Pre-analysis Failed", error_msg)
+            # Clear the bad start point
+            self.path_points_info = []
+            self.app_state = AppState.MARKING_PATH # Return to marking state
+            self.update_ui_for_state()
+            return
+
+        # Store the results from the worker
+        self.path_coherence_map = results["coherence_map"]
+        start_node = results["start_node"]
+
+        # The original point is the first one in the list.
+        original_point = self.path_points_info[0]['point']
+        original_frame = self.path_points_info[0]['frame']
+
+        # Now that pre-analysis is done, update the first point's info with the snapped node
+        self.path_points_info = [{"point": original_point, "frame": original_frame, "node": start_node}]
+
+        self.app_state = AppState.MARKING_PATH
         self.update_ui_for_state()
+        self.info_label.setText("Start point set. Pre-analysis complete. Please mark your end point.")
+        self.update_frame_display(self.current_frame_index)
+
 
     def _get_frame_range(self, for_processing: bool = False) -> Optional[Tuple[int, int]]:
         """Gets the frame range defined by the earliest and latest marked points.
@@ -1490,7 +1544,7 @@ class VesselTracerApp(QMainWindow):
                 self.update_ui_for_state()
 
     def show_segmented_path_preview(self):
-        """Shows a preview of the generated vessel mask."""
+        """Shows a preview of the generated vessel mask, with a progress dialog."""
         if self.app_state != AppState.RANGE_CONFIRMED: return
 
         if self.base_mask_projection is not None:
@@ -1498,40 +1552,48 @@ class VesselTracerApp(QMainWindow):
             self.statusBar().showMessage("Showing cached vessel mask.")
             return
 
-        if self.prepare_and_generate_masks():
+        # This is a user-facing action, so create a progress dialog.
+        frame_range = self._get_frame_range(for_processing=True)
+        if not frame_range: return
+        num_images = frame_range[1] - frame_range[0] + 1
+
+        progress = QProgressDialog("Generating vessel masks...", "Cancel", 0, num_images, self)
+        progress.setWindowModality(Qt.WindowModal)
+        updater = ProgressUpdater(progress)
+
+        was_successful = self.prepare_and_generate_masks(worker_thread=updater)
+        progress.close() # Ensure dialog is closed regardless of outcome
+
+        if was_successful:
             self.display_image(self.overlay_points_on_image(self.base_mask_projection))
             self.statusBar().showMessage("Vessel mask generated and displayed.")
-        else:
+        elif updater.is_running: # Don't show error if user canceled
             QMessageBox.warning(self, "Error", "Failed to generate vessel mask.")
 
-    def prepare_and_generate_masks(self) -> bool:
+    def prepare_and_generate_masks(self, worker_thread: Optional['ProgressUpdater'] = None) -> bool:
         """Prepares and generates all derived data like masks and cost maps.
 
-        This function runs the main pre-processing pipeline, including generating
-        the binary vessel masks, the temporal cost map, and the vessel identity map.
+        This function runs the main pre-processing pipeline. It can be run with
+        a ProgressUpdater to show a dialog, or without for silent background processing.
+
+        Args:
+            worker_thread: An optional updater to report progress to a UI dialog.
 
         Returns:
-            True if mask generation was successful, False otherwise.
+            True if mask generation was successful and not canceled, False otherwise.
         """
-        # Core requirement: processing range always starts from frame 0
         frame_range = self._get_frame_range(for_processing=True)
         if not frame_range:
             return False
         start_f, end_f = frame_range
 
         images_subset = self.images[start_f: end_f + 1]
-
-        progress = QProgressDialog("Generating vessel masks...", "Cancel", 0, len(images_subset), self)
-        progress.setWindowModality(Qt.WindowModal)
-        updater = ProgressUpdater(progress)
-
         dominant_bg_color = self.global_background_color
 
         masks = create_enhanced_vessel_masks(images_subset, self.noise_rois, dominant_bg_color, self,
-                                             self.smoothing_level, updater)
-        progress.close()
+                                             self.smoothing_level, worker_thread)
 
-        if masks and updater.is_running:
+        if masks and (worker_thread is None or worker_thread.is_running):
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
             self.main_vessel_mask = identify_main_vessels(self.base_mask_projection, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
@@ -1539,6 +1601,7 @@ class VesselTracerApp(QMainWindow):
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, self.main_vessel_mask)
             return True
         else:
+            # Clear caches if generation fails or is canceled
             self.vessel_masks = None
             self.base_mask_projection = None
             self.temporal_cost_map = None
@@ -1640,8 +1703,22 @@ class VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
         if self.base_mask_projection is None or self.temporal_cost_map is None:
-            if not self.prepare_and_generate_masks():
-                QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
+            # This is a user-facing action, so create a progress dialog.
+            frame_range = self._get_frame_range(for_processing=True)
+            if not frame_range:
+                self.app_state = AppState.RANGE_CONFIRMED; self.update_ui_for_state(); return
+            num_images = frame_range[1] - frame_range[0] + 1
+
+            progress = QProgressDialog("Generating vessel masks for analysis...", "Cancel", 0, num_images, self)
+            progress.setWindowModality(Qt.WindowModal)
+            updater = ProgressUpdater(progress)
+
+            was_successful = self.prepare_and_generate_masks(worker_thread=updater)
+            progress.close()
+
+            if not was_successful:
+                if updater.is_running: # Don't show error if user canceled
+                    QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
                 self.app_state = AppState.RANGE_CONFIRMED
                 self.update_ui_for_state()
                 return
