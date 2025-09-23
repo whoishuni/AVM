@@ -15,6 +15,33 @@ The key feature of this tool is its "vessel memory" system. Instead of just look
 - **Adjustable Smoothing**: Interactively preview and set the level of Gaussian smoothing to apply before analysis.
 - **Step-by-Step Visualization**: View the entire image processing and analysis pipeline, from filtering to the final path, to understand how the result was generated.
 
+## Technical Details
+
+This tool employs a sophisticated, multi-stage process to accurately identify and trace vessel paths. For developers looking to understand the core logic, the key components are outlined below.
+
+### 1. Vessel Enhancement and Masking
+
+Before pathfinding can occur, the vessels must be clearly segmented from the background. This is achieved through a pipeline designed to handle noise and enhance tubular structures:
+
+- **Preprocessing**: Large, bright, non-vessel artifacts (like catheters or bone structures) are identified using morphological operations and removed from the image.
+- **Vessel Filtering**: The core of vessel enhancement relies on a combination of three specialized filters from `scikit-image`:
+    - **Frangi**: Detects vessel-like structures based on the Hessian matrix eigenvalues. It's excellent at identifying vessels of varying sizes.
+    - **Sato**: Another Hessian-based filter that is also effective for detecting lines and tubes.
+    - **Meijering**: A filter that is less sensitive to noise and provides a good baseline response.
+- **Response Combination**: The responses from all three filters are combined by taking the pixel-wise maximum. This creates a robust "vesselness" map that leverages the strengths of each filter.
+- **Binarization and Post-processing**: The combined response map is thresholded to create a binary mask. Finally, a custom gap-bridging algorithm connects small, disconnected segments by finding and linking the endpoints of their skeletons.
+
+### 2. Pathfinding with a Custom A* Algorithm
+
+The pathfinding is not a simple search on an image. It uses a custom A* algorithm with a unique cost function to find the most "natural" path between user-defined points. The total cost to move to a neighboring pixel is a weighted sum of several factors:
+
+- **Path Coherence Map (Pre-analysis)**: When the user marks the *first* point, a Dijkstra-like search is performed in the background. This search calculates a "cost" based on path incoherence (penalizing turns and brightness changes). The resulting cost map is inverted to create a **Path Coherence Map**, where high values indicate a smooth, continuous path from the start point. This map is the most heavily weighted component in the final A* search, strongly guiding the path along the most likely main vessel trunk.
+- **Temporal Cost**: The cost of a pixel is proportional to the frame number in which it appears. This encourages the path to stay within vessels that appear early and persist through the image sequence, preventing it from jumping to vessels that appear in much later frames.
+- **Vessel Identity Penalty**: The application builds a **Vessel Identity Map** that assigns a unique ID to each continuous vessel segment across all frames. The A* algorithm incurs a very high penalty for jumping from a pixel with one ID to a pixel with a different ID, effectively forcing it to stay within a single, connected vessel structure.
+- **Local Turn Penalty**: A standard turn penalty based on the cosine similarity between the incoming and outgoing vectors is still used to ensure local path smoothness.
+
+This multi-faceted approach allows the algorithm to make intelligent decisions at complex intersections, preferring to follow a single, coherent vessel through time rather than simply taking the shortest spatial path.
+
 ## Setup and Installation
 
 This application is built with Python and requires several common scientific and GUI libraries.
