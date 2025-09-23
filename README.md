@@ -35,10 +35,10 @@ Before pathfinding can occur, the vessels must be clearly segmented from the bac
 
 The pathfinding is not a simple search on an image. It uses a custom A* algorithm with a unique cost function to find the most "natural" path between user-defined points. The total cost to move to a neighboring pixel is a weighted sum of several factors:
 
-- **Path Coherence Map (Pre-analysis)**: When the user marks the *first* point, a Dijkstra-like search is performed in the background. This search calculates a "cost" based on path incoherence (penalizing turns and brightness changes). The resulting cost map is inverted to create a **Path Coherence Map**, where high values indicate a smooth, continuous path from the start point. This map is the most heavily weighted component in the final A* search, strongly guiding the path along the most likely main vessel trunk.
+- **Dynamic Junction Scouting**: When the A* search encounters a junction (a point with multiple branching paths), it performs a "look-ahead" scout down each branch for a short distance. It calculates a "straightness score" for each branch based on how much it turns. The path that continues most directly forward is prioritized, and the other, turning paths are penalized. This allows the algorithm to make intelligent, local decisions at intersections.
 - **Temporal Cost**: The cost of a pixel is proportional to the frame number in which it appears. This encourages the path to stay within vessels that appear early and persist through the image sequence, preventing it from jumping to vessels that appear in much later frames.
 - **Vessel Identity Penalty**: The application builds a **Vessel Identity Map** that assigns a unique ID to each continuous vessel segment across all frames. The A* algorithm incurs a very high penalty for jumping from a pixel with one ID to a pixel with a different ID, effectively forcing it to stay within a single, connected vessel structure.
-- **Local Turn Penalty**: A standard turn penalty based on the cosine similarity between the incoming and outgoing vectors is still used to ensure local path smoothness.
+- **Local Turn Penalty**: In addition to the junction scouting, a standard local turn penalty based on the cosine similarity between the incoming and outgoing vectors is still used to ensure overall path smoothness between junctions.
 
 This multi-faceted approach allows the algorithm to make intelligent decisions at complex intersections, preferring to follow a single, coherent vessel through time rather than simply taking the shortest spatial path.
 
