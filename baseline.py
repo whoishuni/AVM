@@ -450,6 +450,34 @@ def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndar
     return main_vessels_mask.astype(np.uint8)
 
 
+def create_junction_map(mask: np.ndarray) -> np.ndarray:
+    """Creates a map of junction points from a vessel mask.
+
+    Junctions are points on the vessel skeleton that have 3 or more neighbors,
+    indicating a bifurcation or crossing.
+
+    Args:
+        mask: A binary mask of the entire vessel structure.
+
+    Returns:
+        A binary map where junction pixels are marked as 255.
+    """
+    if mask is None or np.sum(mask) == 0:
+        return np.zeros_like(mask)
+
+    skeleton = skeletonize(mask / 255).astype(np.uint8)
+
+    # Use convolution to count neighbors for each skeleton pixel
+    kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.uint8)
+    neighbor_map = cv2.filter2D(skeleton, -1, kernel, borderType=cv2.BORDER_CONSTANT)
+
+    # Junctions are skeleton points with 3 or more neighbors
+    junction_map = np.zeros_like(mask)
+    junction_map[(skeleton > 0) & (neighbor_map >= 3)] = 255
+
+    return junction_map
+
+
 # --- State Management Enums ---
 
 class AppState(Enum):
@@ -873,6 +901,8 @@ class VesselTracerApp(QMainWindow):
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
     MAIN_VESSEL_THICKNESS_THRESHOLD = 5 # Radius in pixels to be considered a main vessel
+    MAIN_TO_BRANCH_PENALTY = 200.0 # Penalty for turning off a main vessel into a branching zone
+    BRANCH_EXPLORATION_RADIUS = 15 # Search radius for finding nearby junctions
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -888,6 +918,7 @@ class VesselTracerApp(QMainWindow):
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
         self.main_vessel_mask: Optional[np.ndarray] = None # Added: Mask for main vessels
+        self.junction_map: Optional[np.ndarray] = None # Added: Map of vessel junctions
         self.noise_rois: List[QRect] = []
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
@@ -1415,6 +1446,7 @@ class VesselTracerApp(QMainWindow):
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
             self.main_vessel_mask = identify_main_vessels(self.base_mask_projection, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
+            self.junction_map = create_junction_map(self.base_mask_projection)
             self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.PATHFINDING_OBSTACLE_COST)
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, self.main_vessel_mask)
             return True
@@ -1424,6 +1456,7 @@ class VesselTracerApp(QMainWindow):
             self.temporal_cost_map = None
             self.vessel_identity_map = None
             self.main_vessel_mask = None
+            self.junction_map = None
             return False
 
     def generate_mask_steps(self, image: np.ndarray, smoothing_level: int) -> List[Tuple[np.ndarray, str]]:
@@ -1574,6 +1607,7 @@ class VesselTracerApp(QMainWindow):
         pixels = anim_data["pixels"]
         base_image = anim_data["baseimage"]
         identity_map = anim_data["identity_map"]
+        junction_map = anim_data["junction_map"]
 
         def update_visualization(visited):
             temp_img = base_image.copy()
@@ -1598,11 +1632,14 @@ class VesselTracerApp(QMainWindow):
             if len(final_mask.shape) > 2: # Ensure it's grayscale
                 final_mask = cv2.cvtColor(final_mask, cv2.COLOR_BGR2GRAY)
 
-            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map, final_mask,
+            # Recreate main vessel mask on the fly for the replay
+            main_vessel_mask = identify_main_vessels(final_mask, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
+
+            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map, final_mask, main_vessel_mask, junction_map,
                                            viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
-                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map, final_mask,
+                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map, final_mask, main_vessel_mask, junction_map,
                                                viz_callback=update_visualization)
 
             if segment:
@@ -1706,11 +1743,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, final_mask, viz_callback=None)
+            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, final_mask, self.main_vessel_mask, self.junction_map, viz_callback=None)
 
             if segment is None:
                 # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, final_mask,
+                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, final_mask, self.main_vessel_mask, self.junction_map,
                                                viz_callback=None)
 
             if segment is None:
@@ -1744,7 +1781,8 @@ class VesselTracerApp(QMainWindow):
         cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
-                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
+                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map,
+                     "junction_map": self.junction_map}
         steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
@@ -1792,12 +1830,52 @@ class VesselTracerApp(QMainWindow):
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius + 2, (0, 0, 0), -1)
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius, color, -1)
 
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, final_mask, viz_callback=None):
+    def _explore_for_branches(self, start_node: Tuple[int, int], vessel_mask: np.ndarray, junction_map: np.ndarray) -> bool:
+        """Performs a short-range BFS to check for nearby junctions.
+
+        Args:
+            start_node: The (y, x) point to start the search from.
+            vessel_mask: The binary mask of all vessels, defining valid search areas.
+            junction_map: The pre-computed map of junction locations.
+
+        Returns:
+            True if a junction is found within the exploration radius, False otherwise.
+        """
+        q = deque([(start_node, 0)])
+        visited = {start_node}
+
+        while q:
+            current_node, distance = q.popleft()
+
+            if distance >= self.BRANCH_EXPLORATION_RADIUS:
+                continue
+
+            # Check if the current node is a junction
+            if junction_map[current_node] > 0:
+                return True
+
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0: continue
+
+                    neighbor = (current_node[0] + dr, current_node[1] + dc)
+
+                    if neighbor not in visited and \
+                       (0 <= neighbor[0] < vessel_mask.shape[0] and 0 <= neighbor[1] < vessel_mask.shape[1]) and \
+                       vessel_mask[neighbor] > 0:
+
+                        visited.add(neighbor)
+                        q.append((neighbor, distance + 1))
+
+        return False
+
+    def find_path_astar(self, cost_map, start, end, vessel_identity_map, final_mask, main_vessel_mask, junction_map, viz_callback=None):
         """Finds the optimal path between two points using the A* algorithm.
 
         This implementation includes costs for distance, time (frame index),
         path curvature, and vessel identity jumps. It enforces a hard rule
-        to prioritize straight paths at junctions.
+        to prioritize straight paths and adds a penalty for turning from a
+        main vessel into a branching zone.
 
         Args:
             cost_map: The base cost map (incorporating temporal cost).
@@ -1805,6 +1883,8 @@ class VesselTracerApp(QMainWindow):
             end: The ending (y, x) coordinate tuple.
             vessel_identity_map: The map assigning a unique ID to each vessel.
             final_mask: The final binary vessel mask (used for bounds checking).
+            main_vessel_mask: A mask identifying the main vessel trunks.
+            junction_map: A map of all bifurcation/junction points.
             viz_callback: An optional function to call for visualizing the search.
 
         Returns:
@@ -1904,6 +1984,7 @@ class VesselTracerApp(QMainWindow):
                         cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
 
                 turn_penalty = 0
+                main_to_branch_penalty = 0
                 if parent:
                     v_in = (current[0] - parent[0], current[1] - parent[1])
                     v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
@@ -1914,7 +1995,14 @@ class VesselTracerApp(QMainWindow):
                         cosine_similarity = dot_product / (mag_in * mag_out)
                         turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
 
-                new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+                        # Check for main-to-branch transition
+                        is_on_main = main_vessel_mask[current] > 0
+                        is_turning = cosine_similarity < 0.9 # Angle > ~25 degrees
+                        if is_on_main and is_turning:
+                            if self._explore_for_branches(neighbor, final_mask, junction_map):
+                                main_to_branch_penalty = self.MAIN_TO_BRANCH_PENALTY
+
+                new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty + main_to_branch_penalty
 
                 if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
                     g_costs[neighbor] = new_g_cost
@@ -1959,6 +2047,7 @@ class VesselTracerApp(QMainWindow):
         self.layered_vessel_mask = None
         self.vessel_identity_map = None
         self.main_vessel_mask = None
+        self.junction_map = None
         self.noise_rois = []
         self.drawing_mode = None
         self.final_paths = None
