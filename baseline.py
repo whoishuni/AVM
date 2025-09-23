@@ -354,7 +354,7 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
-def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
+def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndarray) -> Optional[np.ndarray]:
     """
     Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
 
@@ -362,8 +362,12 @@ def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
     overlaps with a segment in the next, they are considered the same vessel and share
     the same ID. This creates a "memory" of the vessel structure's growth.
 
+    A key feature is the natural branching rule: new, independent vessels are only
+    allowed to form if they originate from a pre-identified "main vessel" trunk.
+
     Args:
         masks: A list of binary vessel masks, one for each frame in the sequence.
+        main_vessel_mask: A binary mask identifying the thickest "trunk" vessels.
 
     Returns:
         An optional 2D NumPy array of the same dimensions as the input masks. Each
@@ -399,27 +403,51 @@ def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
             component_mask = (labels == label_idx)
 
             # To link a new component, we check its boundary against the existing identity map
-            # Erode the component slightly to find the "root" where it connects
             kernel = np.ones((3,3), np.uint8)
             eroded_component = cv2.erode(component_mask.astype(np.uint8), kernel, iterations=1)
             boundary_mask = component_mask & ~eroded_component.astype(bool)
 
-            # Find overlapping IDs in the boundary region within the full identity map so far
             overlap_pixels = identity_map[boundary_mask]
             overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
 
             if len(overlapping_ids) > 0:
-                # Continuation of an existing vessel.
-                # We assign the most common ID found in the overlap.
+                # This component is a continuation of an existing vessel.
                 unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
                 chosen_id = unique_ids[np.argmax(counts)]
                 identity_map[component_mask] = chosen_id
             else:
-                # This is a new, disjoint vessel appearing.
-                identity_map[component_mask] = next_vessel_id
-                next_vessel_id += 1
+                # This is a new, disjoint vessel. Apply the natural branching rule.
+                # It's only a valid new branch if it originates from a main vessel trunk.
+                dilated_component = cv2.dilate(component_mask.astype(np.uint8), kernel, iterations=1)
+                if np.any((dilated_component > 0) & (main_vessel_mask > 0)):
+                    identity_map[component_mask] = next_vessel_id
+                    next_vessel_id += 1
+                # Otherwise, this component is considered noise and is not given an ID.
 
     return identity_map
+
+
+def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndarray:
+    """Identifies main vessel trunks based on their thickness.
+
+    Args:
+        mask: A binary mask of the entire vessel structure.
+        thickness_threshold: The minimum radius a pixel must have to be
+                             considered part of a main vessel.
+
+    Returns:
+        A binary mask highlighting only the main vessels.
+    """
+    if mask is None or np.sum(mask) == 0:
+        return np.zeros_like(mask)
+
+    # Use distance transform to get the radius of the vessel at each point
+    dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+
+    # Threshold the distance map to find areas of sufficient thickness
+    _, main_vessels_mask = cv2.threshold(dist_transform, thickness_threshold, 255, cv2.THRESH_BINARY)
+
+    return main_vessels_mask.astype(np.uint8)
 
 
 # --- State Management Enums ---
@@ -844,6 +872,7 @@ class VesselTracerApp(QMainWindow):
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
+    MAIN_VESSEL_THICKNESS_THRESHOLD = 5 # Radius in pixels to be considered a main vessel
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -858,6 +887,7 @@ class VesselTracerApp(QMainWindow):
         self.vessel_masks: Optional[List[np.ndarray]] = None
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
+        self.main_vessel_mask: Optional[np.ndarray] = None # Added: Mask for main vessels
         self.noise_rois: List[QRect] = []
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
@@ -1384,14 +1414,16 @@ class VesselTracerApp(QMainWindow):
         if masks and updater.is_running:
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
+            self.main_vessel_mask = identify_main_vessels(self.base_mask_projection, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
             self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.PATHFINDING_OBSTACLE_COST)
-            self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks)
+            self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, self.main_vessel_mask)
             return True
         else:
             self.vessel_masks = None
             self.base_mask_projection = None
             self.temporal_cost_map = None
             self.vessel_identity_map = None
+            self.main_vessel_mask = None
             return False
 
     def generate_mask_steps(self, image: np.ndarray, smoothing_level: int) -> List[Tuple[np.ndarray, str]]:
@@ -1926,6 +1958,7 @@ class VesselTracerApp(QMainWindow):
         self.vessel_masks = None
         self.layered_vessel_mask = None
         self.vessel_identity_map = None
+        self.main_vessel_mask = None
         self.noise_rois = []
         self.drawing_mode = None
         self.final_paths = None
