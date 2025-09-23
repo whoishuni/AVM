@@ -844,8 +844,6 @@ class VesselTracerApp(QMainWindow):
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
-    STRAIGHT_PATH_PROBE_PENALTY = 100.0 # Added: Penalty for turning when a straight path exists
-    STRAIGHT_PATH_PROBE_DISTANCE = 10 # Added: Look-ahead distance for the straight path probe
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -1762,51 +1760,19 @@ class VesselTracerApp(QMainWindow):
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius + 2, (0, 0, 0), -1)
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius, color, -1)
 
-    def _probe_straight_path(self, start_point: Tuple[int, int], direction_vector: Tuple[float, float], mask: np.ndarray) -> bool:
-        """Probes in a straight line to see if the vessel continues.
-
-        Args:
-            start_point: The (y, x) starting point for the probe.
-            direction_vector: The (dy, dx) vector defining the straight direction.
-            mask: The binary vessel mask to check against.
-
-        Returns:
-            True if the vessel continues for the probe distance, False otherwise.
-        """
-        dir_y, dir_x = direction_vector
-        mag = math.sqrt(dir_y**2 + dir_x**2)
-        if mag == 0:
-            return False
-
-        unit_dy, unit_dx = dir_y / mag, dir_x / mag
-
-        for i in range(1, self.STRAIGHT_PATH_PROBE_DISTANCE + 1):
-            py = int(round(start_point[0] + i * unit_dy))
-            px = int(round(start_point[1] + i * unit_dx))
-
-            # Check bounds
-            if not (0 <= py < mask.shape[0] and 0 <= px < mask.shape[1]):
-                return False
-
-            # Check if pixel is on the vessel mask
-            if mask[py, px] == 0:
-                return False
-
-        return True
-
     def find_path_astar(self, cost_map, start, end, vessel_identity_map, final_mask, viz_callback=None):
         """Finds the optimal path between two points using the A* algorithm.
 
         This implementation includes costs for distance, time (frame index),
-        path curvature, vessel identity jumps, and a look-ahead probe to
-        encourage straight paths.
+        path curvature, and vessel identity jumps. It enforces a hard rule
+        to prioritize straight paths at junctions.
 
         Args:
             cost_map: The base cost map (incorporating temporal cost).
             start: The starting (y, x) coordinate tuple.
             end: The ending (y, x) coordinate tuple.
             vessel_identity_map: The map assigning a unique ID to each vessel.
-            final_mask: The final binary vessel mask, used for the straight path probe.
+            final_mask: The final binary vessel mask (used for bounds checking).
             viz_callback: An optional function to call for visualizing the search.
 
         Returns:
@@ -1832,7 +1798,6 @@ class VesselTracerApp(QMainWindow):
             if current == end:
                 if viz_callback:
                     viz_callback(list(closed_set))
-
                 path = []
                 while current in came_from:
                     path.append(current)
@@ -1849,63 +1814,81 @@ class VesselTracerApp(QMainWindow):
 
             parent = came_from.get(current)
 
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    if dr == 0 and dc == 0: continue
-                    neighbor = (current[0] + dr, current[1] + dc)
+            # --- Neighbor Categorization ---
+            straight_neighbors = []
+            turning_neighbors = []
 
-                    if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]) or \
-                            cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
-                            neighbor in closed_set:
-                        continue
+            if parent:
+                v_in = (current[0] - parent[0], current[1] - parent[1])
+                mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
 
-                    # --- Cost Calculation ---
-                    # 1. Base movement cost
-                    move_cost = np.sqrt(dr ** 2 + dc ** 2)
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        if dr == 0 and dc == 0: continue
+                        neighbor = (current[0] + dr, current[1] + dc)
 
-                    # 2. Temporal cost from pre-calculated map
-                    time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
+                        if not (0 <= neighbor[0] < final_mask.shape[0] and 0 <= neighbor[1] < final_mask.shape[1]) or \
+                                cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
+                                neighbor in closed_set:
+                            continue
 
-                    # 3. Vessel identity penalty
-                    cross_vessel_penalty = 0
-                    if vessel_identity_map is not None:
-                        current_id = vessel_identity_map[current]
-                        neighbor_id = vessel_identity_map[neighbor]
-                        if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
-                            cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
-
-                    # 4. Turn penalties (both standard and look-ahead)
-                    turn_penalty = 0
-                    straight_probe_penalty = 0
-
-                    if parent:
-                        v_in = (current[0] - parent[0], current[1] - parent[1])
                         v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
-
-                        mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
                         mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
 
                         if mag_in > 0 and mag_out > 0:
                             dot_product = v_in[0] * v_out[0] + v_in[1] * v_out[1]
                             cosine_similarity = dot_product / (mag_in * mag_out)
 
-                            # Standard turn penalty (always applied)
-                            turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
+                            if cosine_similarity > 0.9:  # Angle < ~25 degrees
+                                straight_neighbors.append(neighbor)
+                            else:
+                                turning_neighbors.append(neighbor)
+                        else:
+                            turning_neighbors.append(neighbor) # Should not happen if mag_in > 0
 
-                            # Look-ahead probe penalty (applied only if turning is unnecessary)
-                            # A turn is happening if cosine_similarity is less than ~0.7 (more than 45 degrees)
-                            if cosine_similarity < 0.707:
-                                if self._probe_straight_path(current, v_in, final_mask):
-                                    straight_probe_penalty = self.STRAIGHT_PATH_PROBE_PENALTY
+            # If no parent (start node), all neighbors are effectively turning
+            if not parent:
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        if dr == 0 and dc == 0: continue
+                        neighbor = (current[0] + dr, current[1] + dc)
+                        if (0 <= neighbor[0] < final_mask.shape[0] and 0 <= neighbor[1] < final_mask.shape[1]) and \
+                           cost_map[neighbor] < self.PATHFINDING_OBSTACLE_COST and neighbor not in closed_set:
+                            turning_neighbors.append(neighbor)
 
-                    # --- Total Cost ---
-                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty + straight_probe_penalty
+            # --- Hard Constraint Logic ---
+            neighbors_to_process = straight_neighbors if straight_neighbors else turning_neighbors
 
-                    if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
-                        g_costs[neighbor] = new_g_cost
-                        f_cost = new_g_cost + heuristic(neighbor, end)
-                        heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
-                        came_from[neighbor] = current
+            for neighbor in neighbors_to_process:
+                # --- Cost Calculation ---
+                move_cost = np.sqrt((neighbor[0] - current[0])**2 + (neighbor[1] - current[1])**2)
+                time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
+
+                cross_vessel_penalty = 0
+                if vessel_identity_map is not None:
+                    current_id = vessel_identity_map[current]
+                    neighbor_id = vessel_identity_map[neighbor]
+                    if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
+                        cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
+
+                turn_penalty = 0
+                if parent:
+                    v_in = (current[0] - parent[0], current[1] - parent[1])
+                    v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
+                    mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
+                    mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
+                    if mag_in > 0 and mag_out > 0:
+                        dot_product = v_in[0] * v_out[0] + v_in[1] * v_out[1]
+                        cosine_similarity = dot_product / (mag_in * mag_out)
+                        turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
+
+                new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+
+                if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
+                    g_costs[neighbor] = new_g_cost
+                    f_cost = new_g_cost + heuristic(neighbor, end)
+                    heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
+                    came_from[neighbor] = current
 
         return None
 
