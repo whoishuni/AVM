@@ -844,6 +844,8 @@ class VesselTracerApp(QMainWindow):
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
+    STRAIGHT_PATH_PROBE_PENALTY = 100.0 # Added: Penalty for turning when a straight path exists
+    STRAIGHT_PATH_PROBE_DISTANCE = 10 # Added: Look-ahead distance for the straight path probe
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -1561,11 +1563,16 @@ class VesselTracerApp(QMainWindow):
                 cv2.circle(current_costmap, (prev_node[1], prev_node[0]), self.FORBIDDEN_ZONE_RADIUS,
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
-            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map,
+            # The final mask is needed for the straight path probe
+            final_mask = cv2.threshold(anim_data["baseimage"], 1, 255, cv2.THRESH_BINARY)[1]
+            if len(final_mask.shape) > 2: # Ensure it's grayscale
+                final_mask = cv2.cvtColor(final_mask, cv2.COLOR_BGR2GRAY)
+
+            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map, final_mask,
                                            viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
-                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map,
+                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map, final_mask,
                                                viz_callback=update_visualization)
 
             if segment:
@@ -1669,11 +1676,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, viz_callback=None)
+            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, final_mask, viz_callback=None)
 
             if segment is None:
                 # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map,
+                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, final_mask,
                                                viz_callback=None)
 
             if segment is None:
@@ -1755,18 +1762,51 @@ class VesselTracerApp(QMainWindow):
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius + 2, (0, 0, 0), -1)
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius, color, -1)
 
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None):
+    def _probe_straight_path(self, start_point: Tuple[int, int], direction_vector: Tuple[float, float], mask: np.ndarray) -> bool:
+        """Probes in a straight line to see if the vessel continues.
+
+        Args:
+            start_point: The (y, x) starting point for the probe.
+            direction_vector: The (dy, dx) vector defining the straight direction.
+            mask: The binary vessel mask to check against.
+
+        Returns:
+            True if the vessel continues for the probe distance, False otherwise.
+        """
+        dir_y, dir_x = direction_vector
+        mag = math.sqrt(dir_y**2 + dir_x**2)
+        if mag == 0:
+            return False
+
+        unit_dy, unit_dx = dir_y / mag, dir_x / mag
+
+        for i in range(1, self.STRAIGHT_PATH_PROBE_DISTANCE + 1):
+            py = int(round(start_point[0] + i * unit_dy))
+            px = int(round(start_point[1] + i * unit_dx))
+
+            # Check bounds
+            if not (0 <= py < mask.shape[0] and 0 <= px < mask.shape[1]):
+                return False
+
+            # Check if pixel is on the vessel mask
+            if mask[py, px] == 0:
+                return False
+
+        return True
+
+    def find_path_astar(self, cost_map, start, end, vessel_identity_map, final_mask, viz_callback=None):
         """Finds the optimal path between two points using the A* algorithm.
 
         This implementation includes costs for distance, time (frame index),
-        path curvature (turn penalty), and for crossing between different
-        vessel structures (cross vessel penalty).
+        path curvature, vessel identity jumps, and a look-ahead probe to
+        encourage straight paths.
 
         Args:
             cost_map: The base cost map (incorporating temporal cost).
             start: The starting (y, x) coordinate tuple.
             end: The ending (y, x) coordinate tuple.
             vessel_identity_map: The map assigning a unique ID to each vessel.
+            final_mask: The final binary vessel mask, used for the straight path probe.
             viz_callback: An optional function to call for visualizing the search.
 
         Returns:
@@ -1807,6 +1847,8 @@ class VesselTracerApp(QMainWindow):
             if viz_callback and node_counter % viz_interval == 0:
                 viz_callback(list(closed_set))
 
+            parent = came_from.get(current)
+
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
                     if dr == 0 and dc == 0: continue
@@ -1817,7 +1859,14 @@ class VesselTracerApp(QMainWindow):
                             neighbor in closed_set:
                         continue
 
-                    # --- Vessel identity penalty ---
+                    # --- Cost Calculation ---
+                    # 1. Base movement cost
+                    move_cost = np.sqrt(dr ** 2 + dc ** 2)
+
+                    # 2. Temporal cost from pre-calculated map
+                    time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
+
+                    # 3. Vessel identity penalty
                     cross_vessel_penalty = 0
                     if vessel_identity_map is not None:
                         current_id = vessel_identity_map[current]
@@ -1825,25 +1874,32 @@ class VesselTracerApp(QMainWindow):
                         if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
                             cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
 
-                    # --- Morphology-aware path penalty ---
+                    # 4. Turn penalties (both standard and look-ahead)
                     turn_penalty = 0
-                    parent = came_from.get(current)
+                    straight_probe_penalty = 0
+
                     if parent:
-                        v1 = (current[0] - parent[0], current[1] - parent[1])
-                        v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
+                        v_in = (current[0] - parent[0], current[1] - parent[1])
+                        v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
 
-                        dot_product = v1[0] * v2[0] + v1[1] * v2[1]
-                        mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
-                        mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
+                        mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
+                        mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
 
-                        if mag1 > 0 and mag2 > 0:
-                            # 1 - cos(theta) gives a value from 0 (straight) to 2 (180-degree turn)
-                            cosine_similarity = dot_product / (mag1 * mag2)
+                        if mag_in > 0 and mag_out > 0:
+                            dot_product = v_in[0] * v_out[0] + v_in[1] * v_out[1]
+                            cosine_similarity = dot_product / (mag_in * mag_out)
+
+                            # Standard turn penalty (always applied)
                             turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
 
-                    move_cost = np.sqrt(dr ** 2 + dc ** 2)
-                    time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
-                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+                            # Look-ahead probe penalty (applied only if turning is unnecessary)
+                            # A turn is happening if cosine_similarity is less than ~0.7 (more than 45 degrees)
+                            if cosine_similarity < 0.707:
+                                if self._probe_straight_path(current, v_in, final_mask):
+                                    straight_probe_penalty = self.STRAIGHT_PATH_PROBE_PENALTY
+
+                    # --- Total Cost ---
+                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty + straight_probe_penalty
 
                     if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
                         g_costs[neighbor] = new_g_cost
