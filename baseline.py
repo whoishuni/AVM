@@ -355,8 +355,12 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
+<<<<<<< HEAD
 def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray,
                                 app_instance: 'VesselTracerApp') -> np.ndarray:
+=======
+def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
     """Generates a map where each pixel's value represents path coherence from a start node.
 
     This is done using a Dijkstra-like search where the 'cost' is a measure of
@@ -463,7 +467,10 @@ def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndar
 
     return main_vessels_mask.astype(np.uint8)
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndarray) -> Optional[np.ndarray]:
     """
     Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
@@ -494,7 +501,11 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
     # Process the first frame to initialize vessel identities
     if np.any(masks[0]):
         num_labels, labels = cv2.connectedComponents(masks[0])
+<<<<<<< HEAD
         for label_idx in range(1, num_labels):  # Skip background label 0
+=======
+        for label_idx in range(1, num_labels): # Skip background label 0
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             component_mask = (labels == label_idx)
             identity_map[component_mask] = next_vessel_id
             next_vessel_id += 1
@@ -502,7 +513,11 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
     # Process subsequent frames
     for i in range(1, len(masks)):
         # Get the new components from the current frame that are not in the previous one
+<<<<<<< HEAD
         new_growth_mask = cv2.subtract(masks[i], masks[i - 1])
+=======
+        new_growth_mask = cv2.subtract(masks[i], masks[i-1])
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 
         if not np.any(new_growth_mask):
             continue
@@ -513,7 +528,11 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
             component_mask = (labels == label_idx)
 
             # To link a new component, we check its boundary against the existing identity map
+<<<<<<< HEAD
             kernel = np.ones((3, 3), np.uint8)
+=======
+            kernel = np.ones((3,3), np.uint8)
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             eroded_component = cv2.erode(component_mask.astype(np.uint8), kernel, iterations=1)
             boundary_mask = component_mask & ~eroded_component.astype(bool)
 
@@ -536,7 +555,10 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
 
     return identity_map
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 # --- State Management Enums ---
 
 class AppState(Enum):
@@ -552,6 +574,45 @@ class AppState(Enum):
 class DrawingMode(Enum):
     """Defines the available drawing modes for the user."""
     NOISE_ROI = auto()  # User is drawing a rectangle to define a noise area.
+
+
+class AnalysisWorker(QThread):
+    """A QThread worker for running analysis tasks in the background."""
+    analysis_complete = pyqtSignal(dict)
+
+    def __init__(self, app_instance, start_point):
+        super().__init__()
+        self.app = app_instance
+        self.start_point = start_point
+        self.is_running = True
+
+    def run(self):
+        """Runs the analysis pipeline."""
+        results = {"success": False}
+        # Call prepare_and_generate_masks without a worker_thread to prevent UI creation
+        if self.app.base_mask_projection is None:
+            # Pass worker_thread=None to prevent UI creation from background thread
+            if not self.app.prepare_and_generate_masks(worker_thread=None):
+                results["error"] = "Mask generation was canceled or failed during pre-analysis."
+                self.analysis_complete.emit(results)
+                return
+
+        start_node = self.app.find_closest_pixel_on_mask(self.start_point, self.app.base_mask_projection)
+        if not start_node:
+            results["error"] = "Point Not on Vessel"
+            self.analysis_complete.emit(results)
+            return
+
+        full_range_mip = create_maximum_intensity_projection(self.app.images)
+        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, full_range_mip, self.app)
+
+        results["success"] = True
+        results["coherence_map"] = coherence_map
+        results["start_node"] = start_node
+        self.analysis_complete.emit(results)
+
+    def stop(self):
+        self.is_running = False
 
 
 class AnalysisWorker(QThread):
@@ -1499,7 +1560,11 @@ class VesselTracerApp(QMainWindow):
             QMessageBox.warning(self, "Pre-analysis Failed", error_msg)
             # Clear the bad start point
             self.path_points_info = []
+<<<<<<< HEAD
             self.app_state = AppState.MARKING_PATH  # Return to marking state
+=======
+            self.app_state = AppState.MARKING_PATH # Return to marking state
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             self.update_ui_for_state()
             return
 
@@ -1518,6 +1583,10 @@ class VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
         self.info_label.setText("Start point set. Pre-analysis complete. Please mark your end point.")
         self.update_frame_display(self.current_frame_index)
+<<<<<<< HEAD
+=======
+
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 
     def _get_frame_range(self, for_processing: bool = False) -> Optional[Tuple[int, int]]:
         """Gets the frame range defined by the earliest and latest marked points.
@@ -1602,12 +1671,20 @@ class VesselTracerApp(QMainWindow):
         updater = ProgressUpdater(progress)
 
         was_successful = self.prepare_and_generate_masks(worker_thread=updater)
+<<<<<<< HEAD
         progress.close()  # Ensure dialog is closed regardless of outcome
+=======
+        progress.close() # Ensure dialog is closed regardless of outcome
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
 
         if was_successful:
             self.display_image(self.overlay_points_on_image(self.base_mask_projection))
             self.statusBar().showMessage("Vessel mask generated and displayed.")
+<<<<<<< HEAD
         elif updater.is_running:  # Don't show error if user canceled
+=======
+        elif updater.is_running: # Don't show error if user canceled
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             QMessageBox.warning(self, "Error", "Failed to generate vessel mask.")
 
     def prepare_and_generate_masks(self, worker_thread: Optional['ProgressUpdater'] = None) -> bool:
@@ -1747,9 +1824,13 @@ class VesselTracerApp(QMainWindow):
             # This is a user-facing action, so create a progress dialog.
             frame_range = self._get_frame_range(for_processing=True)
             if not frame_range:
+<<<<<<< HEAD
                 self.app_state = AppState.RANGE_CONFIRMED;
                 self.update_ui_for_state();
                 return
+=======
+                self.app_state = AppState.RANGE_CONFIRMED; self.update_ui_for_state(); return
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
             num_images = frame_range[1] - frame_range[0] + 1
 
             progress = QProgressDialog("Generating vessel masks for analysis...", "Cancel", 0, num_images, self)
@@ -1760,9 +1841,14 @@ class VesselTracerApp(QMainWindow):
             progress.close()
 
             if not was_successful:
+<<<<<<< HEAD
                 if updater.is_running:  # Don't show error if user canceled
                     QMessageBox.warning(self, "Analysis Aborted",
                                         "Failed to generate vessel mask. Cannot continue analysis.")
+=======
+                if updater.is_running: # Don't show error if user canceled
+                    QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
+>>>>>>> b21e2c8a00436fe7e33ada9280445ebf280c41f3
                 self.app_state = AppState.RANGE_CONFIRMED
                 self.update_ui_for_state()
                 return
