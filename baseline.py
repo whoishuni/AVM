@@ -34,13 +34,18 @@ except ImportError as e:
 # --- Global Helper Functions ---
 
 def natural_sort_key(s: str) -> list:
-    """Provides a key for natural sorting of filenames (e.g., 'img10.jpg' after 'img2.jpg').
+    """Provides a key for natural sorting of filenames.
+
+    This allows sorting filenames in a way that humans expect, for example,
+    'image10.jpg' will come after 'image2.jpg' instead of before it. It
+    works by splitting the string into text and number parts.
 
     Args:
         s: The string to generate a sort key for.
 
     Returns:
-        A list of strings and integers used for sorting.
+        A list of strings and integers used for sorting. For example,
+        'img10.jpg' becomes ['img', 10, '.jpg'].
     """
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
@@ -48,11 +53,17 @@ def natural_sort_key(s: str) -> list:
 def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
     """Loads a sequence of grayscale images from a folder, sorted naturally.
 
+    It iterates through all files in the given directory, filters for common
+    image extensions, and loads them as grayscale NumPy arrays. The list of
+    images is sorted using a natural sort order to handle filenames with
+    numbers correctly.
+
     Args:
         folder_path: The path to the directory containing the images.
 
     Returns:
-        A list of images as NumPy arrays, or an empty list if an error occurs.
+        A list of images as NumPy arrays. If the folder cannot be read or
+        contains no valid images, an empty list is returned.
     """
     images = []
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -75,13 +86,17 @@ def load_images_from_folder(folder_path: str) -> List[np.ndarray]:
 
 
 def get_most_frequent_color(image: np.ndarray) -> int:
-    """Gets the most frequent pixel value in an image, assumed to be the background.
+    """Gets the most frequent pixel value in an image.
+
+    This is typically used to determine the background color of an image,
+    assuming the background makes up the largest area.
 
     Args:
         image: The input image as a NumPy array.
 
     Returns:
-        The most frequent pixel value (0-255). Returns 255 if the image is None.
+        The most frequent pixel value (0-255). Returns 255 as a default
+        if the image is invalid or empty.
     """
     if image is None: return 255
     unique, counts = np.unique(image, return_counts=True)
@@ -91,17 +106,20 @@ def get_most_frequent_color(image: np.ndarray) -> int:
 def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
     """Intelligently connects separated vessel segments in a binary mask.
 
-    This method is more accurate than simple dilation. It skeletonizes the mask,
-    finds endpoints of the skeleton lines, and connects the closest pair of
-    endpoints that belong to different contours, provided they are within
-    `max_distance`.
+    This method provides a more precise way to connect broken vessel segments
+    than simple morphological dilation. It works by skeletonizing the mask to
+    find the vessel centerlines, identifying the endpoints of these lines, and
+    then drawing lines to connect the closest pairs of endpoints that belong
+    to different segments, provided they are within `max_distance`.
 
     Args:
         mask: The binary (0 or 255) vessel mask as a NumPy array.
-        max_distance: The maximum pixel distance to bridge between two endpoints.
+        max_distance: The maximum pixel distance to bridge between two
+                      endpoints of different segments.
 
     Returns:
-        A new mask with gaps bridged, or a copy of the original if no bridging occurs.
+        A new mask with gaps bridged. If no bridging occurs or the input mask
+        is empty, a copy of the original is returned.
     """
     if mask is None or np.sum(mask) == 0:
         return mask.copy() if mask is not None else np.array([])
@@ -165,16 +183,21 @@ def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
 
 def remove_large_bright_areas(image: np.ndarray, bg_color: int, threshold_offset: int = 15,
                               kernel_size: int = 15) -> np.ndarray:
-    """Removes large bright areas from the image to reduce background interference.
+    """Removes large bright areas from an image to reduce background noise.
 
-    This is useful for removing large, non-vessel structures (like catheters or
-    bone) that are brighter than the background but not part of the vasculature.
+    This function is designed to eliminate large, non-vessel structures (like
+    catheters or bones) that are brighter than the background but are not part
+    of the vasculature. It works by thresholding the image to find bright
+    areas and then using morphological opening to identify and remove only the
+    large ones.
 
     Args:
         image: The input grayscale image.
-        bg_color: The background color of the image.
-        threshold_offset: Value subtracted from `bg_color` to set the brightness threshold.
-        kernel_size: The size of the morphological kernel used to identify large areas.
+        bg_color: The background color of the image, used as a reference.
+        threshold_offset: A value subtracted from `bg_color` to set the
+                          brightness threshold for what is considered a "bright" area.
+        kernel_size: The size of the morphological kernel used to define what
+                     constitutes a "large" area.
 
     Returns:
         The processed image with large bright areas replaced by `bg_color`.
@@ -193,24 +216,33 @@ def create_enhanced_vessel_masks(images: List[np.ndarray], noise_rois: List[QRec
                                  worker_thread: Optional['ProgressUpdater']) -> Optional[List[np.ndarray]]:
     """Generates a sequence of enhanced binary vessel masks from raw images.
 
-    This function applies a multi-stage pipeline to each image:
-    1. Removes large, bright background areas.
-    2. Applies Gaussian smoothing.
-    3. Masks out user-defined noise regions.
-    4. Inverts the image and applies Frangi, Sato, and Meijering vessel enhancement filters.
-    5. Combines the filter responses and thresholds the result into a binary mask.
-    6. Bridges small gaps in the final mask.
+    This function implements a multi-stage image processing pipeline to extract
+    vessel structures from a sequence of raw medical images. The pipeline is
+    as follows:
+    1. Removes large, bright background areas that could be mistaken for vessels.
+    2. Applies Gaussian smoothing to reduce noise.
+    3. Masks out user-defined regions of interest (ROIs) containing known noise.
+    4. Inverts the image (vessels become bright) and applies a combination of
+       Frangi, Sato, and Meijering vessel enhancement filters.
+    5. Combines the filter responses by taking the maximum value at each pixel.
+    6. Thresholds the combined response to create a binary mask.
+    7. Bridges small gaps between vessel segments in the final mask.
 
     Args:
-        images: A list of the raw grayscale images.
+        images: A list of the raw grayscale images in the sequence.
         noise_rois: A list of QRects defining areas to exclude from processing.
         bg_color: The dominant background color of the images.
-        app_instance: The main application instance to access parameters.
-        smoothing_level: The level of Gaussian blur to apply (0 for none).
-        worker_thread: An optional updater for reporting progress to the UI.
+        app_instance: The main application instance, used to access parameters
+                      like kernel sizes and thresholds.
+        smoothing_level: The level of Gaussian blur to apply (0 for none). A
+                         higher level means more smoothing.
+        worker_thread: An optional `ProgressUpdater` instance used to report
+                       progress to a UI dialog and check for cancellation.
 
     Returns:
-        A list of binary vessel masks, or None if the process was canceled.
+        A list of binary vessel masks (NumPy arrays), one for each input
+        image. Returns `None` if the process was canceled by the user via the
+        `worker_thread`.
     """
     masks = []
     total_images = len(images)
@@ -265,34 +297,41 @@ def create_enhanced_vessel_masks(images: List[np.ndarray], noise_rois: List[QRec
 
 
 def create_maximum_intensity_projection(images: List[np.ndarray]) -> Optional[np.ndarray]:
-    """Creates a Maximum Intensity Projection (MIP) image from a sequence.
+    """Creates a Maximum Intensity Projection (MIP) from an image sequence.
 
-    The MIP is an image where each pixel takes the maximum intensity value from
-    the corresponding pixels across all images in the sequence.
+    The MIP is a 2D image where each pixel's value is the maximum intensity
+    value from the corresponding pixel position across all images in the
+    sequence. This is useful for visualizing all vessels from a sequence
+    in a single static image.
 
     Args:
         images: A list of images as NumPy arrays.
 
     Returns:
-        A single MIP image, or None if the input list is empty.
+        A single 2D NumPy array representing the MIP image, or `None` if the
+        input list is empty.
     """
     if not images: return None
     return np.max(np.stack(images, axis=0), axis=0)
 
 
 def create_temporal_cost_map(masks: List[np.ndarray], obstacle_cost: float) -> Optional[np.ndarray]:
-    """Creates a cost map where the cost is related to the frame number.
+    """Creates a cost map where pixel cost is related to its frame number.
 
-    This map is used in pathfinding to penalize paths that jump between frames
-    that are far apart in time. The cost of a vessel pixel is its frame index,
-    encouraging the path to stay within vessels that appear early and persist.
+    This map is a crucial input for the A* pathfinding algorithm. It encodes
+    temporal information into the pathfinding problem. The cost of a pixel
+    belonging to a vessel is set to its frame index. This penalizes paths
+    that jump between frames that are far apart in time, encouraging the
+    pathfinder to follow vessels as they appear and persist through the sequence.
 
     Args:
-        masks: A list of binary vessel masks for the sequence.
-        obstacle_cost: The high cost value to assign to non-vessel pixels.
+        masks: A list of binary vessel masks for the image sequence.
+        obstacle_cost: The high cost value to assign to non-vessel pixels,
+                       effectively making them obstacles for the pathfinder.
 
     Returns:
-        A 2D cost map, or None if the input list is empty.
+        A 2D cost map as a float32 NumPy array, or `None` if the input list
+        is empty.
     """
     if not masks: return None
     h, w = masks[0].shape
@@ -307,19 +346,22 @@ def create_temporal_cost_map(masks: List[np.ndarray], obstacle_cost: float) -> O
 
 
 def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional[np.ndarray]:
-    """Divides the vessel mask into 10 layers based on original image brightness.
+    """Divides a vessel mask into layers based on original image brightness.
 
-    Brighter vessels in the original MIP are assigned to higher layers (e.g.,
-    layer 10), while dimmer vessels are in lower layers. This can help to
-    separate overlapping vessels based on their intensity.
+    This function separates vessels into 10 distinct layers (1-10) based on
+    their brightness in the original Maximum Intensity Projection (MIP) image.
+    Brighter vessels, which are often more prominent or closer to the "camera",
+    are assigned to higher layers, while dimmer vessels are in lower layers.
+    This can help to computationally separate overlapping vessels.
 
     Args:
-        mask: The binary vessel mask.
-        original_mip: The Maximum Intensity Projection of the original images.
+        mask: The binary vessel mask (all vessels).
+        original_mip: The Maximum Intensity Projection of the original images,
+                      used as the brightness reference.
 
     Returns:
-        A layered mask where pixel values (1-10) correspond to the brightness
-        layer, or None if the inputs are invalid.
+        A layered mask where each pixel's value (1-10) corresponds to its
+        brightness layer. Returns `None` if the inputs are invalid or empty.
     """
     if mask is None or original_mip is None or np.sum(mask) == 0:
         return None
@@ -354,101 +396,22 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
-def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
-    """Generates a map where each pixel's value represents path coherence from a start node.
-
-    This is done using a Dijkstra-like search where the 'cost' is a measure of
-    'incoherence', penalizing turns and changes in brightness. The final map
-    is an inverse of these costs, so high values mean high coherence.
-
-    Args:
-        start_node: The (y, x) starting point for the exploration.
-        vessel_mask: The binary mask of all vessels.
-        original_mip: The original MIP image, used for brightness checks.
-        app_instance: The main application instance to access parameters.
-
-    Returns:
-        A float32 NumPy array representing the coherence map.
-    """
-    if vessel_mask[start_node] == 0:
-        return np.zeros(vessel_mask.shape, dtype=np.float32)
-
-    costs = np.full(vessel_mask.shape, np.inf, dtype=np.float32)
-    costs[start_node] = 0
-    pq = [(0, start_node)]  # (cost, (y, x))
-    came_from = {}
-
-    while pq:
-        cost, current = heapq.heappop(pq)
-
-        if cost > costs[current]:
-            continue
-
-        parent = came_from.get(current)
-
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0: continue
-
-                neighbor = (current[0] + dr, current[1] + dc)
-
-                if not (0 <= neighbor[0] < vessel_mask.shape[0] and 0 <= neighbor[1] < vessel_mask.shape[1]) or \
-                   vessel_mask[neighbor] == 0:
-                    continue
-
-                # Calculate incoherence cost for this step
-                incoherence = 0
-
-                # 1. Turn penalty
-                if parent:
-                    v_in = (current[0] - parent[0], current[1] - parent[1])
-                    v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
-                    mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
-                    mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
-                    if mag_in > 0 and mag_out > 0:
-                        dot = v_in[0] * v_out[0] + v_in[1] * v_out[1]
-                        cosine_similarity = dot / (mag_in * mag_out)
-                        incoherence += app_instance.COHERENCE_TURN_PENALTY * (1.0 - cosine_similarity)
-
-                # 2. Color/Intensity change penalty
-                color_diff = abs(int(original_mip[current]) - int(original_mip[neighbor]))
-                incoherence += app_instance.COHERENCE_COLOR_CHANGE_PENALTY * (color_diff / 255.0)
-
-                # 3. Movement cost
-                move_cost = math.sqrt(dr**2 + dc**2)
-
-                new_cost = costs[current] + move_cost + incoherence
-                if new_cost < costs[neighbor]:
-                    costs[neighbor] = new_cost
-                    came_from[neighbor] = current
-                    heapq.heappush(pq, (new_cost, neighbor))
-
-    # Convert costs to a coherence map (inverse relationship, handle inf)
-    coherence_map = np.zeros_like(costs)
-    valid_costs = costs[costs != np.inf]
-    if len(valid_costs) > 0:
-        max_cost = np.max(valid_costs)
-        # Invert cost to get coherence, adding epsilon to avoid division by zero
-        coherence_map[costs != np.inf] = max_cost - costs[costs != np.inf]
-
-    # Normalize to 0-1 range
-    min_val, max_val = np.min(coherence_map), np.max(coherence_map)
-    if max_val > min_val:
-        coherence_map = (coherence_map - min_val) / (max_val - min_val)
-
-    return coherence_map
-
-
 def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndarray:
     """Identifies main vessel trunks based on their thickness.
 
+    This function uses a distance transform on the vessel mask to calculate the
+    radius of the vessel at each point. It then thresholds this distance map
+    to create a new mask that includes only the pixels corresponding to the
+    thickest parts of the vessels, effectively identifying the main trunks.
+
     Args:
         mask: A binary mask of the entire vessel structure.
-        thickness_threshold: The minimum radius a pixel must have to be
-                             considered part of a main vessel.
+        thickness_threshold: The minimum radius (in pixels) a point must have
+                             to be considered part of a main vessel trunk.
 
     Returns:
-        A binary mask highlighting only the main vessels.
+        A binary mask highlighting only the main vessels. Returns a zero mask
+        if the input is empty.
     """
     if mask is None or np.sum(mask) == 0:
         return np.zeros_like(mask)
@@ -462,24 +425,28 @@ def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndar
     return main_vessels_mask.astype(np.uint8)
 
 def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndarray) -> Optional[np.ndarray]:
-    """
-    Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
+    """Builds a map that assigns a unique, persistent ID to each vessel segment.
 
-    This function tracks vessel segments from frame to frame. If a segment in one frame
-    overlaps with a segment in the next, they are considered the same vessel and share
-    the same ID. This creates a "memory" of the vessel structure's growth.
+    This function tracks vessel segments from one frame to the next. If a
+    segment in one frame overlaps with a segment in the next, they are
+    considered to be the same vessel and are assigned the same unique ID. This
+    process creates a "memory" of the vessel structure's growth and connectivity
+    over time.
 
-    A key feature is the natural branching rule: new, independent vessels are only
-    allowed to form if they originate from a pre-identified "main vessel" trunk.
+    A key feature is the "natural branching rule": new, independent vessels are
+    only allowed to form if they originate from a pre-identified "main vessel"
+    trunk. This prevents spurious noise from being identified as a new vessel.
 
     Args:
         masks: A list of binary vessel masks, one for each frame in the sequence.
-        main_vessel_mask: A binary mask identifying the thickest "trunk" vessels.
+        main_vessel_mask: A binary mask identifying the thickest "trunk"
+                          vessels, used to enforce the natural branching rule.
 
     Returns:
-        An optional 2D NumPy array of the same dimensions as the input masks. Each
-        pixel corresponding to a vessel is assigned an integer ID unique to that
-        vessel structure across all frames. Returns None if the input is empty.
+        A 2D NumPy array of the same dimensions as the input masks. Each pixel
+        corresponding to a vessel is assigned an integer ID unique to that
+        vessel structure across all frames. Non-vessel pixels are 0. Returns
+        `None` if the input mask list is empty.
     """
     if not masks:
         return None
@@ -536,57 +503,31 @@ def build_vessel_identity_map(masks: List[np.ndarray], main_vessel_mask: np.ndar
 # --- State Management Enums ---
 
 class AppState(Enum):
-    """Defines the possible states of the application's finite state machine."""
-    IDLE = auto()             # Application is waiting for images to be loaded.
-    LOADED = auto()           # Images are loaded, ready for user interaction.
-    MARKING_PATH = auto()     # User is actively marking points on the image.
-    RANGE_CONFIRMED = auto()  # User has confirmed points, ready for configuration or analysis.
-    PROCESSING = auto()       # Application is busy with a background task (e.g., mask generation).
-    DONE = auto()             # Analysis is complete and results are shown.
+    """Defines the possible states of the application's finite state machine.
+
+    Attributes:
+        IDLE: Application is waiting for images to be loaded.
+        LOADED: Images are loaded, ready for user interaction.
+        MARKING_PATH: User is actively marking points on the image.
+        RANGE_CONFIRMED: User has confirmed points, ready for configuration or analysis.
+        PROCESSING: Application is busy with a background task.
+        DONE: Analysis is complete and results are shown.
+    """
+    IDLE = auto()
+    LOADED = auto()
+    MARKING_PATH = auto()
+    RANGE_CONFIRMED = auto()
+    PROCESSING = auto()
+    DONE = auto()
 
 
 class DrawingMode(Enum):
-    """Defines the available drawing modes for the user."""
-    NOISE_ROI = auto()        # User is drawing a rectangle to define a noise area.
+    """Defines the available drawing modes for the user.
 
-
-class AnalysisWorker(QThread):
-    """A QThread worker for running analysis tasks in the background."""
-    analysis_complete = pyqtSignal(dict)
-
-    def __init__(self, app_instance, start_point):
-        super().__init__()
-        self.app = app_instance
-        self.start_point = start_point
-        self.is_running = True
-
-    def run(self):
-        """Runs the analysis pipeline."""
-        results = {"success": False}
-        # Call prepare_and_generate_masks without a worker_thread to prevent UI creation
-        if self.app.base_mask_projection is None:
-            # Pass worker_thread=None to prevent UI creation from background thread
-            if not self.app.prepare_and_generate_masks(worker_thread=None):
-                results["error"] = "Mask generation was canceled or failed during pre-analysis."
-                self.analysis_complete.emit(results)
-                return
-
-        start_node = self.app.find_closest_pixel_on_mask(self.start_point, self.app.base_mask_projection)
-        if not start_node:
-            results["error"] = "Point Not on Vessel"
-            self.analysis_complete.emit(results)
-            return
-
-        full_range_mip = create_maximum_intensity_projection(self.app.images)
-        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, full_range_mip, self.app)
-
-        results["success"] = True
-        results["coherence_map"] = coherence_map
-        results["start_node"] = start_node
-        self.analysis_complete.emit(results)
-
-    def stop(self):
-        self.is_running = False
+    Attributes:
+        NOISE_ROI: User is drawing a rectangle to define a noise area.
+    """
+    NOISE_ROI = auto()
 
 
 # --- PyQt5 Components ---
@@ -594,15 +535,17 @@ class AnalysisWorker(QThread):
 class ImageLabel(QLabel):
     """A custom QLabel for displaying images with interactive capabilities.
 
-    This label handles scaling pixmaps to fit its size, converting mouse click
-    coordinates from window space to image space, and managing the drawing of
-    rectangular regions of interest (ROIs).
+    This label is central to the application's UI. It handles scaling pixmaps
+    to fit its size, converting mouse click coordinates from the widget's
+    coordinate system to the original image's coordinate system, and managing
+    the user interaction for drawing rectangular regions of interest (ROIs).
 
     Signals:
-        point_clicked (pyqtSignal): Emitted when the user clicks on the image,
-                                    providing the QPoint in image coordinates.
+        point_clicked (pyqtSignal): Emitted when the user clicks on the image.
+                                    The payload is the QPoint of the click in
+                                    image coordinates.
         roi_drawn (pyqtSignal): Emitted when the user finishes drawing a
-                                rectangular ROI, providing the QRect.
+                                rectangular ROI. The payload is the final QRect.
     """
     point_clicked = pyqtSignal(QPoint)
     roi_drawn = pyqtSignal(QRect)
@@ -611,7 +554,7 @@ class ImageLabel(QLabel):
         """Initializes the ImageLabel.
 
         Args:
-            parent: The parent widget, typically the main application window.
+            parent: The parent widget, which is the main application window.
         """
         super().__init__(parent)
         self.main_window = parent
@@ -627,6 +570,8 @@ class ImageLabel(QLabel):
     def setPixmap(self, pixmap: QPixmap):
         """Sets the pixmap to be displayed and triggers a rescale.
 
+        This is the primary method for changing the image shown in the label.
+
         Args:
             pixmap: The QPixmap to display in the label.
         """
@@ -634,15 +579,20 @@ class ImageLabel(QLabel):
         self.update_scaled_pixmap()
 
     def update_scaled_pixmap(self):
-        """Rescales the current pixmap to fit the label size while maintaining aspect ratio."""
+        """Rescales the current pixmap to fit the label's size.
+
+        This method ensures the image always fits within the label while
+        maintaining its original aspect ratio. It's called automatically
+        when the pixmap is set or when the label is resized.
+        """
         if self.current_pixmap and not self.current_pixmap.isNull():
             super().setPixmap(self.current_pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event: 'QResizeEvent'):
         """Handles the widget's resize event to rescale the pixmap.
 
         Args:
-            event: The QResizeEvent.
+            event: The QResizeEvent provided by Qt.
         """
         self.update_scaled_pixmap()
         super().resizeEvent(event)
@@ -650,12 +600,17 @@ class ImageLabel(QLabel):
     def get_image_coords(self, event_pos: QPoint) -> Optional[QPoint]:
         """Converts window coordinates to original, unscaled image coordinates.
 
+        This crucial helper method translates a mouse click position from the
+        widget's coordinate system (which can change with window size) to the
+        fixed coordinate system of the original, unscaled image.
+
         Args:
             event_pos: The QPoint of the mouse event in widget coordinates.
 
         Returns:
-            A QPoint in the original image's coordinate system, or None if the
-            click was outside the displayed pixmap area.
+            A QPoint in the original image's coordinate system, or `None` if
+            the click was outside the displayed pixmap area (e.g., in the
+            letterboxed margins).
         """
         if not self.current_pixmap or self.current_pixmap.isNull():
             return None
@@ -676,11 +631,14 @@ class ImageLabel(QLabel):
 
         return QPoint(int(img_x), int(img_y))
 
-    def mousePressEvent(self, event):
-        """Handles the start of a mouse click or ROI drawing.
+    def mousePressEvent(self, event: 'QMouseEvent'):
+        """Handles the start of a mouse click or an ROI drawing operation.
+
+        If the application is in `MARKING_PATH` state, it emits a `point_clicked`
+        signal. If a drawing mode is active, it initiates the drawing of an ROI.
 
         Args:
-            event: The QMouseEvent.
+            event: The QMouseEvent provided by Qt.
         """
         if event.button() == Qt.LeftButton:
             if self.main_window.app_state == AppState.MARKING_PATH:
@@ -694,11 +652,14 @@ class ImageLabel(QLabel):
                     self.current_drawing_roi = QRect(start_pos, start_pos)
                     self.update()
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, event: 'QMouseEvent'):
         """Handles mouse movement during ROI drawing to update the rectangle.
 
+        This method is called continuously as the user drags the mouse,
+        updating the ROI rectangle to provide real-time feedback.
+
         Args:
-            event: The QMouseEvent.
+            event: The QMouseEvent provided by Qt.
         """
         if self.is_drawing_roi:
             end_pos = self.get_image_coords(event.pos())
@@ -706,11 +667,14 @@ class ImageLabel(QLabel):
                 self.current_drawing_roi.setBottomRight(end_pos)
                 self.update()
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(self, event: 'QMouseEvent'):
         """Handles the end of an ROI drawing, emitting the final rectangle.
 
+        When the user releases the mouse button, this method finalizes the ROI
+        and emits the `roi_drawn` signal if the ROI is of a valid size.
+
         Args:
-            event: The QMouseEvent.
+            event: The QMouseEvent provided by Qt.
         """
         if self.is_drawing_roi and event.button() == Qt.LeftButton:
             self.is_drawing_roi = False
@@ -719,11 +683,14 @@ class ImageLabel(QLabel):
             self.current_drawing_roi = None
             self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event: 'QPaintEvent'):
         """Draws the ROI rectangle on top of the image during creation.
 
+        This method is responsible for painting the semi-transparent rectangle
+        that the user sees while they are defining an ROI.
+
         Args:
-            event: The QPaintEvent.
+            event: The QPaintEvent provided by Qt.
         """
         super().paintEvent(event)
         if not self.is_drawing_roi or not self.current_drawing_roi:
@@ -758,20 +725,22 @@ class ImageLabel(QLabel):
 
 
 class SmoothingPreviewDialog(QDialog):
-    """A dialog window for interactively previewing Gaussian blur smoothing.
+    """A dialog for interactively previewing Gaussian blur smoothing.
 
-    This dialog shows a preview of an image with a variable amount of Gaussian
-    blur applied, controlled by a slider. This allows the user to choose an
-    appropriate smoothing level before running the full analysis.
+    This dialog displays an image with a variable amount of Gaussian blur
+    applied, controlled by a slider. This allows the user to find an
+    appropriate smoothing level for their specific images before committing to
+    running the full, computationally expensive analysis.
     """
 
     def __init__(self, base_image: np.ndarray, initial_level: int, parent=None):
         """Initializes the smoothing preview dialog.
 
         Args:
-            base_image: The original image (as a NumPy array) to apply smoothing to.
+            base_image: The original image (as a NumPy array) to which smoothing
+                        will be applied for the preview.
             initial_level: The starting value for the smoothing slider (0-10).
-            parent: The parent widget.
+            parent: The parent widget, typically the main application window.
         """
         super().__init__(parent)
         self.setWindowTitle("Smoothing Effect Preview")
@@ -803,7 +772,12 @@ class SmoothingPreviewDialog(QDialog):
         self.update_preview()
 
     def update_preview(self):
-        """Updates the image preview when the slider value changes."""
+        """Updates the image preview when the slider value changes.
+
+        This method is called whenever the slider's value is modified. It
+        re-applies the Gaussian blur with the new kernel size, updates the
+        label text, and refreshes the displayed image.
+        """
         self.smoothing_level = self.slider.value()
         kernel_size = self.smoothing_level * 2 + 1
 
@@ -820,22 +794,23 @@ class SmoothingPreviewDialog(QDialog):
         scaled_pixmap = pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.image_label.setPixmap(scaled_pixmap)
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event: 'QResizeEvent'):
         """Handles the resize event to ensure the preview image scales correctly.
 
         Args:
-            event: The QResizeEvent.
+            event: The QResizeEvent provided by Qt.
         """
         self.update_preview()
         super().resizeEvent(event)
 
 
 class StepViewerDialog(QDialog):
-    """A dialog for viewing the sequential steps of image processing and analysis.
+    """A dialog for viewing the sequential steps of image processing.
 
     This window displays a series of images, each representing a step in the
-    processing pipeline (e.g., filtering, masking, pathfinding). The user can
-    navigate back and forth through these steps.
+    processing and analysis pipeline (e.g., filtering, masking, pathfinding).
+    The user can navigate back and forth through these steps to understand how
+    the application arrived at the final result.
     """
 
     def __init__(self, steps: list, main_window: 'VesselTracerApp', parent=None):
@@ -843,7 +818,8 @@ class StepViewerDialog(QDialog):
 
         Args:
             steps: A list of tuples, where each tuple contains a QPixmap for the
-                   step's image and a string description.
+                   step's image, a string description, and optional metadata
+                   (e.g., for triggering animations).
             main_window: A reference to the main application window, used for
                          triggering animation replays.
             parent: The parent widget.
@@ -884,7 +860,11 @@ class StepViewerDialog(QDialog):
         self.update_view()
 
     def update_view(self):
-        """Updates the displayed image and description to the current step."""
+        """Updates the displayed image and description to the current step.
+
+        This method sets the pixmap and description text based on the current
+        step index and updates the enabled state of the navigation buttons.
+        """
         step_info = self.steps[self.current_step_index]
         pixmap, description = step_info[0], step_info[1]
 
@@ -901,29 +881,33 @@ class StepViewerDialog(QDialog):
             self.replay_button.hide()
 
     def trigger_replay(self):
-        """Triggers the pathfinding animation replay in the main window."""
+        """Triggers the pathfinding animation replay in the main window.
+
+        This is called when the user clicks the "Replay Animation" button,
+        which is only visible on the A* search result step.
+        """
         step_info = self.steps[self.current_step_index]
         if len(step_info) > 2 and self.main_window:
             anim_data = step_info[2]
             self.main_window.replay_path_animation(anim_data)
 
     def prev_step(self):
-        """Navigates to the previous step."""
+        """Navigates to the previous step in the visualization sequence."""
         if self.current_step_index > 0:
             self.current_step_index -= 1
             self.update_view()
 
     def next_step(self):
-        """Navigates to the next step."""
+        """Navigates to the next step in the visualization sequence."""
         if self.current_step_index < len(self.steps) - 1:
             self.current_step_index += 1
             self.update_view()
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event: 'QResizeEvent'):
         """Handles the resize event to scale the currently displayed step image.
 
         Args:
-            event: The QResizeEvent.
+            event: The QResizeEvent provided by Qt.
         """
         self.update_view()
         super().resizeEvent(event)
@@ -932,9 +916,10 @@ class StepViewerDialog(QDialog):
 class ProgressUpdater:
     """A helper class to update a QProgressDialog from a background thread.
 
-    This class provides a simple interface to update a progress dialog's value
-    and check for cancellation without directly passing the dialog object into
-    the processing function, which can be cleaner.
+    This class provides a simple, thread-safe interface to update a progress
+    dialog's value and check for cancellation. It avoids the need to pass the
+    QProgressDialog widget directly into processing functions, which can lead
+    to cleaner, more decoupled code.
     """
 
     def __init__(self, progress_dialog: QProgressDialog):
@@ -947,14 +932,15 @@ class ProgressUpdater:
         self.is_running = True
 
     def progress_updated(self, value: int, total: int):
-        """Updates the progress dialog and checks for cancellation.
+        """Updates the progress dialog and checks for user cancellation.
 
-        If the dialog has been canceled by the user, the `is_running` flag is
-        set to False.
+        If the dialog's "Cancel" button has been clicked, this method sets the
+        `is_running` flag to `False`, allowing the background process to detect
+        the cancellation request and terminate gracefully.
 
         Args:
-            value: The current progress value.
-            total: The maximum progress value.
+            value: The current progress value (e.g., number of images processed).
+            total: The maximum progress value (e.g., total number of images).
         """
         if self.dialog.wasCanceled():
             self.is_running = False
@@ -969,20 +955,25 @@ class ProgressUpdater:
 class VesselTracerApp(QMainWindow):
     """The main application window for 2D vessel tracing.
 
-    This class manages the application's state, UI, and the core logic for
-    image processing and path analysis. It follows a state machine pattern
-    defined by the AppState enum.
+    This class orchestrates the entire application. It manages the user
+    interface, application state (using the `AppState` enum), and the core
+    logic for image processing and path analysis. It holds all application
+    data, such as loaded images, generated masks, and user-defined points.
+
+    The class also defines a set of tunable parameters that control the
+    behavior of the image processing and pathfinding algorithms.
 
     Attributes:
         BG_REMOVAL_THRESHOLD_OFFSET (int): Parameter for background removal.
-        BG_REMOVAL_KERNEL_SIZE (int): Kernel size for background removal morphology.
-        MAX_NODE_SEARCH_RADIUS (int): Max distance to search for a vessel pixel near a click.
-        MAX_GAP_BRIDGE_DISTANCE (int): Max distance for bridging gaps in vessel masks.
-        FORBIDDEN_ZONE_RADIUS (int): Radius to prevent A* from immediately backtracking.
-        TIME_COST_WEIGHT (float): Weight for the temporal cost in A* pathfinding.
-        PATHFINDING_OBSTACLE_COST (float): High cost for pixels not on the vessel mask.
-        TURN_PENALTY_WEIGHT (float): Weight for the turn penalty in A* pathfinding.
-        CROSS_VESSEL_PENALTY (float): High penalty for jumping between different vessels.
+        BG_REMOVAL_KERNEL_size (int): Kernel size for background removal.
+        MAX_NODE_SEARCH_RADIUS (int): Max distance to search for a vessel pixel.
+        MAX_GAP_BRIDGE_DISTANCE (int): Max distance for bridging gaps in masks.
+        FORBIDDEN_ZONE_RADIUS (int): Radius to prevent A* from backtracking.
+        TIME_COST_WEIGHT (float): Weight for temporal cost in A* pathfinding.
+        PATHFINDING_OBSTACLE_COST (float): Cost for non-vessel pixels in A*.
+        TURN_PENALTY_WEIGHT (float): Weight for turn penalty in A* pathfinding.
+        CROSS_VESSEL_PENALTY (float): Penalty for jumping between vessel IDs.
+        MAIN_VESSEL_THICKNESS_THRESHOLD (int): Min thickness for main vessels.
     """
     # --- Tunable Parameters ---
     BG_REMOVAL_THRESHOLD_OFFSET = 15
@@ -995,10 +986,6 @@ class VesselTracerApp(QMainWindow):
     TURN_PENALTY_WEIGHT = 50.0
     CROSS_VESSEL_PENALTY = 1e6
     MAIN_VESSEL_THICKNESS_THRESHOLD = 5
-    # --- Coherence Map Parameters ---
-    COHERENCE_TURN_PENALTY = 5.0
-    COHERENCE_COLOR_CHANGE_PENALTY = 10.0
-    COHERENCE_MAP_WEIGHT = 50.0
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -1014,7 +1001,6 @@ class VesselTracerApp(QMainWindow):
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
         self.main_vessel_mask: Optional[np.ndarray] = None
-        self.path_coherence_map: Optional[np.ndarray] = None
         self.noise_rois: List[QRect] = []
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
@@ -1190,7 +1176,13 @@ class VesselTracerApp(QMainWindow):
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
 
     def update_ui_for_state(self):
-        """Updates the UI element states (text, enabled/disabled) based on the current AppState."""
+        """Updates UI element states based on the current `AppState`.
+
+        This method is the central controller for the GUI's appearance and
+        interactivity. It enables or disables buttons, changes text labels,
+        and shows or hides UI elements to guide the user through the workflow.
+        It is called whenever the application's state changes.
+        """
         is_interactive = self.app_state != AppState.PROCESSING
 
         # Define UI configurations for each state
@@ -1208,7 +1200,7 @@ class VesselTracerApp(QMainWindow):
             },
             AppState.MARKING_PATH: {
                 "main_action_text": "Confirm Points", "main_action_enabled": len(self.path_points_info) >= 2,
-                "info_text": (f"Start point set. Pre-analysis complete. Please mark your end point." if len(self.path_points_info) == 1 else f"Marked {len(self.path_points_info)} points. Click 'Confirm Points' when done."),
+                "info_text": f"Marked {len(self.path_points_info)} points. Mark at least 2, then click 'Confirm Points'.",
                 "status_text": "Marking path...",
                 "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False
             },
@@ -1249,13 +1241,15 @@ class VesselTracerApp(QMainWindow):
         if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
             self.info_label.setText("Drag the mouse on the image to draw a noise area to exclude.")
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event: 'QKeyEvent'):
         """Handles keyboard events for frame navigation.
 
-        'A' moves to the previous frame, 'D' moves to the next frame.
+        This allows the user to navigate through the image sequence using the
+        'A' key for the previous frame and the 'D' key for the next frame,
+        providing a convenient alternative to the slider.
 
         Args:
-            event: The QKeyEvent.
+            event: The QKeyEvent provided by Qt.
         """
         if not self.images or self.app_state not in [AppState.LOADED, AppState.MARKING_PATH]:
             super().keyPressEvent(event)
@@ -1274,7 +1268,7 @@ class VesselTracerApp(QMainWindow):
             super().keyPressEvent(event)
 
     def select_folder(self):
-        """Opens a dialog to select an image folder and loads the images."""
+        """Opens a file dialog to select a folder and loads the images."""
         path = QFileDialog.getExistingDirectory(self, "Select Image Folder")
         if path:
             self.reset_system()
@@ -1293,16 +1287,20 @@ class VesselTracerApp(QMainWindow):
             self.update_ui_for_state()
 
     def slider_value_changed(self, value: int):
-        """Slot for the frame slider's valueChanged signal.
+        """Slot for the frame slider's `valueChanged` signal.
 
         Args:
-            value: The new slider value (frame index).
+            value: The new slider value, which corresponds to a frame index.
         """
         self.update_frame_display(value)
         self.update_ui_for_state()
 
     def update_frame_display(self, frame_index: int):
         """Updates the main image display to show a specific frame.
+
+        This method retrieves the specified frame from the loaded image list,
+        overlays any relevant UI elements (like marked points), and displays
+        the result in the main image label.
 
         Args:
             frame_index: The index of the image to display.
@@ -1318,13 +1316,18 @@ class VesselTracerApp(QMainWindow):
         self.display_image(display_img)
 
     def draw_path_points_on_image(self, image_bgr: np.ndarray, frame_index: int, detailed_color: bool) -> np.ndarray:
-        """Draws marked path points (start, middle, end) onto an image.
+        """Draws marked path points onto a given image.
+
+        This function renders the user-defined points (start, middle, end) as
+        circles on the image. It can use different colors and styles to indicate
+        the point's role and whether it is on the currently displayed frame.
 
         Args:
-            image_bgr: The BGR image (NumPy array) to draw on.
-            frame_index: The index of the current frame being displayed.
+            image_bgr: The BGR image (as a NumPy array) to draw on.
+            frame_index: The index of the current frame being displayed. This is
+                         used to determine which points to highlight.
             detailed_color: If True, uses different colors for start/end points
-                            and highlights points on the current frame.
+                            and a different style for points on the current frame.
 
         Returns:
             The image with points drawn on it.
@@ -1351,15 +1354,19 @@ class VesselTracerApp(QMainWindow):
         return image_bgr
 
     def get_overlayed_display_image(self, base_image_gray: np.ndarray, frame_index: Optional[int]) -> np.ndarray:
-        """Creates a display image by overlaying points and ROIs on a base image.
+        """Creates a composite display image by overlaying UI elements.
+
+        This method takes a base grayscale image and draws all necessary
+        overlays on top, such as marked path points and noise ROIs, before it
+        is displayed to the user.
 
         Args:
             base_image_gray: The base grayscale image.
             frame_index: The current frame index, used for highlighting points.
-                         If None, uses the currently stored frame index.
+                         If `None`, the application's current frame index is used.
 
         Returns:
-            A BGR image with all overlays drawn.
+            A BGR NumPy array representing the final image with all overlays.
         """
         if frame_index is None:
             frame_index = self.current_frame_index
@@ -1373,7 +1380,13 @@ class VesselTracerApp(QMainWindow):
         return display_img_bgr
 
     def handle_main_action(self):
-        """Handles clicks on the main action button, progressing the application's state."""
+        """Handles clicks on the main action button.
+
+        This method acts as a state machine transition trigger. The button's
+        function changes depending on the application's current state,
+        advancing the user through the workflow from marking points to
+        confirming them and finally running the analysis.
+        """
         if self.app_state == AppState.LOADED:
             self.app_state = AppState.MARKING_PATH
         elif self.app_state == AppState.MARKING_PATH:
@@ -1390,10 +1403,11 @@ class VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
     def handle_point_selection(self, point: QPoint):
-        """Handles a point selection event from the ImageLabel.
+        """Handles a point selection event from the `ImageLabel`.
 
-        If it's the first point, it triggers the coherence map pre-analysis
-        in a background thread. Otherwise, it just adds the point to the list.
+        This is a key part of the user workflow. If it is the first point
+        selected, it triggers a background pre-analysis to generate the path
+        coherence map. Subsequent points are simply added to a list.
 
         Args:
             point: The QPoint where the user clicked, in image coordinates.
@@ -1401,64 +1415,23 @@ class VesselTracerApp(QMainWindow):
         if self.app_state != AppState.MARKING_PATH or self.active_thread is not None:
             return
 
-        # --- New Workflow: Pre-analysis on first point ---
-        if not self.path_points_info:
-            self.app_state = AppState.PROCESSING
-            self.update_ui_for_state()
-            self.info_label.setText("First point marked. Running background pre-analysis of vessel structure...")
-
-            # Store the point temporarily so the worker can access it
-            self.path_points_info.append({"point": point, "frame": self.current_frame_index})
-
-            self.active_thread = AnalysisWorker(self, point)
-            self.active_thread.analysis_complete.connect(self.on_pre_analysis_complete)
-            self.active_thread.start()
-        else:
-            # This is a subsequent point (middle or end).
-            self.path_points_info.append({"point": point, "frame": self.current_frame_index})
-            self.path_points_info.sort(key=lambda p: p['frame'])
-            self.update_frame_display(self.current_frame_index)
-            self.update_ui_for_state()
-
-    def on_pre_analysis_complete(self, results: dict):
-        """Handles the completion of the background pre-analysis task."""
-        self.active_thread = None
-
-        if not results.get("success"):
-            error_msg = results.get("error", "An unknown error occurred during pre-analysis.")
-            QMessageBox.warning(self, "Pre-analysis Failed", error_msg)
-            # Clear the bad start point
-            self.path_points_info = []
-            self.app_state = AppState.MARKING_PATH # Return to marking state
-            self.update_ui_for_state()
-            return
-
-        # Store the results from the worker
-        self.path_coherence_map = results["coherence_map"]
-        start_node = results["start_node"]
-
-        # The original point is the first one in the list.
-        original_point = self.path_points_info[0]['point']
-        original_frame = self.path_points_info[0]['frame']
-
-        # Now that pre-analysis is done, update the first point's info with the snapped node
-        self.path_points_info = [{"point": original_point, "frame": original_frame, "node": start_node}]
-
-        self.app_state = AppState.MARKING_PATH
-        self.update_ui_for_state()
-        self.info_label.setText("Start point set. Pre-analysis complete. Please mark your end point.")
+        # This is a subsequent point (middle or end).
+        self.path_points_info.append({"point": point, "frame": self.current_frame_index})
+        self.path_points_info.sort(key=lambda p: p['frame'])
         self.update_frame_display(self.current_frame_index)
-
+        self.update_ui_for_state()
 
     def _get_frame_range(self, for_processing: bool = False) -> Optional[Tuple[int, int]]:
-        """Gets the frame range defined by the earliest and latest marked points.
+        """Gets the frame range defined by the user's marked points.
 
         Args:
-            for_processing: If True, the start frame is always 0 for analysis.
-                            If False, uses the actual earliest marked frame for UI previews.
+            for_processing: If `True`, the start frame is always 0, as the
+                            analysis pipeline requires context from the very
+                            first frame. If `False`, it uses the actual earliest
+                            marked frame, which is more intuitive for UI previews.
 
         Returns:
-            A tuple of (start_frame, end_frame), or None if no points are marked.
+            A tuple of (start_frame, end_frame), or `None` if no points are marked.
         """
         if not self.path_points_info:
             return None
@@ -1476,7 +1449,12 @@ class VesselTracerApp(QMainWindow):
         return start_f, end_f
 
     def update_range_view(self):
-        """Updates the image display to show the MIP of the selected frame range."""
+        """Updates the image display to show the MIP of the selected frame range.
+
+        After the user confirms their points, this method calculates a Maximum
+        Intensity Projection (MIP) over the frames spanned by the points and
+        displays it. This gives the user a clear view of the area of interest.
+        """
         frame_range = self._get_frame_range(for_processing=False)  # For UI preview, show user-selected range
         if not frame_range: return
         start_f, end_f = frame_range
@@ -1487,12 +1465,21 @@ class VesselTracerApp(QMainWindow):
             self.display_image(img_with_overlays)
 
     def add_noise_roi_mode(self):
-        """Enters the mode for drawing noise ROIs on the image."""
+        """Enters the mode for drawing noise ROIs on the image.
+
+        This sets the `drawing_mode` state, which is checked by the `ImageLabel`
+        to handle mouse events for drawing rectangles.
+        """
         self.drawing_mode = DrawingMode.NOISE_ROI
         self.update_ui_for_state()
 
     def open_smoothing_preview(self):
-        """Opens the smoothing preview dialog to adjust the smoothing level."""
+        """Opens the smoothing preview dialog to let the user adjust smoothing.
+
+        This method creates and shows a `SmoothingPreviewDialog`, allowing the
+        user to interactively find the best smoothing level for their data.
+        If the user accepts the new level, cached mask data is cleared.
+        """
         if self.app_state != AppState.RANGE_CONFIRMED:
             return
 
@@ -1522,9 +1509,11 @@ class VesselTracerApp(QMainWindow):
                 self.update_ui_for_state()
 
     def handle_roi_drawn(self, roi: QRect):
-        """Handles the completion of an ROI drawing from the ImageLabel.
+        """Handles the completion of an ROI drawing from the `ImageLabel`.
 
-        Adds the ROI to the list of noise areas and clears cached data.
+        This slot is connected to the `roi_drawn` signal. It adds the new
+        noise ROI to the list and clears any cached mask data, as the analysis
+        will need to be re-run with the new noise area excluded.
 
         Args:
             roi: The QRect of the drawn noise area.
@@ -1544,7 +1533,12 @@ class VesselTracerApp(QMainWindow):
                 self.update_ui_for_state()
 
     def show_segmented_path_preview(self):
-        """Shows a preview of the generated vessel mask, with a progress dialog."""
+        """Shows a preview of the generated vessel mask.
+
+        This method generates the vessel masks if they haven't been created yet
+        (showing a progress dialog) and then displays the resulting MIP mask
+        in the main image label.
+        """
         if self.app_state != AppState.RANGE_CONFIRMED: return
 
         if self.base_mask_projection is not None:
@@ -1573,14 +1567,18 @@ class VesselTracerApp(QMainWindow):
     def prepare_and_generate_masks(self, worker_thread: Optional['ProgressUpdater'] = None) -> bool:
         """Prepares and generates all derived data like masks and cost maps.
 
-        This function runs the main pre-processing pipeline. It can be run with
-        a ProgressUpdater to show a dialog, or without for silent background processing.
+        This is a core processing function that runs the main pre-processing
+        pipeline. It generates the sequence of vessel masks and all derived data
+        products, such as the mask projection, main vessel mask, temporal cost
+        map, and vessel identity map.
 
         Args:
-            worker_thread: An optional updater to report progress to a UI dialog.
+            worker_thread: An optional `ProgressUpdater` to report progress to a
+                           UI dialog and allow for cancellation.
 
         Returns:
-            True if mask generation was successful and not canceled, False otherwise.
+            `True` if mask generation was successful and not canceled,
+            `False` otherwise.
         """
         frame_range = self._get_frame_range(for_processing=True)
         if not frame_range:
@@ -1610,14 +1608,19 @@ class VesselTracerApp(QMainWindow):
             return False
 
     def generate_mask_steps(self, image: np.ndarray, smoothing_level: int) -> List[Tuple[np.ndarray, str]]:
-        """Generates a list of (image, description) tuples for visualizing the mask creation process.
+        """Generates images and descriptions for the mask creation process.
+
+        This method runs through the mask generation pipeline step-by-step on a
+        single image and captures the output at each stage. This is used to
+        populate the `StepViewerDialog`.
 
         Args:
             image: The input image to process (typically a MIP).
             smoothing_level: The smoothing level to use for the demonstration.
 
         Returns:
-            A list of tuples, where each is (step_image, step_description).
+            A list of tuples, where each tuple contains an image of a processing
+            step and a string describing that step.
         """
         if image is None:
             return []
@@ -1687,10 +1690,10 @@ class VesselTracerApp(QMainWindow):
         """Overlays marked path points onto a given base image.
 
         Args:
-            base_image: The grayscale base image.
+            base_image: The grayscale base image (e.g., a vessel mask).
 
         Returns:
-            A BGR image with the points drawn on it.
+            A BGR image with the points drawn on it for display.
         """
         bgr_image = cv2.cvtColor(base_image, cv2.COLOR_GRAY2BGR)
         # Use a -1 frame index, meaning don't specially highlight any points
@@ -1698,7 +1701,13 @@ class VesselTracerApp(QMainWindow):
         return bgr_image
 
     def start_analysis(self):
-        """Starts the full analysis pipeline after user confirmation."""
+        """Starts the full analysis pipeline after user confirmation.
+
+        This method orchestrates the final pathfinding process. It ensures all
+        necessary data (like masks) is generated, finds the user-marked points
+        on the mask, and then calls the method to run the A* search and display
+        the final, detailed step-by-step results.
+        """
         self.app_state = AppState.PROCESSING
         self.update_ui_for_state()
 
@@ -1732,11 +1741,9 @@ class VesselTracerApp(QMainWindow):
             self.update_ui_for_state()
             return
 
-        # The start node was already found during pre-analysis.
-        mask_pixels = [self.path_points_info[0]["node"]]
+        mask_pixels = []
         all_pixels_found = True
-        # Find subsequent points
-        for p_info in self.path_points_info[1:]:
+        for p_info in self.path_points_info:
             pixel = self.find_closest_pixel_on_mask(p_info["point"], final_mask)
             if pixel:
                 mask_pixels.append(pixel)
@@ -1744,7 +1751,7 @@ class VesselTracerApp(QMainWindow):
                 all_pixels_found = False
                 break
 
-        if not all_pixels_found or not mask_pixels or len(mask_pixels) < 2:
+        if not all_pixels_found or len(mask_pixels) < 2:
             QMessageBox.warning(self, "Pathfinding Failed",
                                 "Could not locate all marked points on the vessel mask.\n\n"
                                 "Please try:\n"
@@ -1764,16 +1771,18 @@ class VesselTracerApp(QMainWindow):
     def replay_path_animation(self, anim_data: dict):
         """Replays the A* pathfinding search animation from the step viewer.
 
+        This method provides a visual demonstration of the A* algorithm's search
+        process, which can be triggered from the `StepViewerDialog`.
+
         Args:
             anim_data: A dictionary containing the data needed for the animation,
-                       including the costmap, start/end pixels, and base image.
+                       such as the cost map, start/end pixels, and base image.
         """
         self.statusBar().showMessage("Replaying pathfinding animation...")
         cost_map = anim_data["costmap"]
         pixels = anim_data["pixels"]
         base_image = anim_data["baseimage"]
         identity_map = anim_data["identity_map"]
-        coherence_map = anim_data["coherence_map"]
 
         def update_visualization(visited):
             temp_img = base_image.copy()
@@ -1793,11 +1802,11 @@ class VesselTracerApp(QMainWindow):
                 cv2.circle(current_costmap, (prev_node[1], prev_node[0]), self.FORBIDDEN_ZONE_RADIUS,
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
-            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map, coherence_map,
+            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map,
                                            viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
-                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map, coherence_map,
+                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map,
                                                viz_callback=update_visualization)
 
             if segment:
@@ -1810,15 +1819,16 @@ class VesselTracerApp(QMainWindow):
         self.statusBar().showMessage("Animation replay finished.", 3000)
 
     def show_full_analysis_steps(self, final_mask, mask_pixels, pathfinding_costmap):
-        """Prepares and shows the final step-by-step analysis results dialog.
+        """Prepares and shows the final, complete step-by-step analysis dialog.
 
-        This method assembles all visualization steps, runs the final A*
-        pathfinding, and displays the results in a StepViewerDialog.
+        This method assembles all visualization steps—from mask generation to
+        final pathfinding—runs the A* algorithm, and then displays the entire
+        sequence in a `StepViewerDialog` for the user to inspect.
 
         Args:
-            final_mask: The final binary vessel mask.
+            final_mask: The final binary vessel mask for the entire sequence.
             mask_pixels: The list of user-marked points, snapped to the mask.
-            pathfinding_costmap: The cost map for the A* algorithm.
+            pathfinding_costmap: The combined cost map for the A* algorithm.
         """
         self.statusBar().showMessage("Preparing full analysis steps...", 5000)
         QApplication.processEvents()
@@ -1901,11 +1911,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, self.path_coherence_map, viz_callback=None)
+            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, viz_callback=None)
 
             if segment is None:
                 # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, self.path_coherence_map,
+                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map,
                                                viz_callback=None)
 
             if segment is None:
@@ -1939,8 +1949,7 @@ class VesselTracerApp(QMainWindow):
         cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
-                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map,
-                     "coherence_map": self.path_coherence_map}
+                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
         steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
@@ -1955,10 +1964,14 @@ class VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
     def generate_final_path_image(self, base_original_pip: np.ndarray):
-        """Generates the final result image with the path drawn on the original MIP.
+        """Generates the final result image with the path on the original MIP.
+
+        This method takes the final calculated path and draws it onto the
+        original Maximum Intensity Projection image for the final display.
 
         Args:
-            base_original_pip: The Maximum Intensity Projection of the original images.
+            base_original_pip: The Maximum Intensity Projection of the original
+                               images in the selected range.
         """
         if base_original_pip is None:
             self.final_path_image = np.zeros((512, 512, 3), dtype=np.uint8)
@@ -1988,24 +2001,150 @@ class VesselTracerApp(QMainWindow):
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius + 2, (0, 0, 0), -1)
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius, color, -1)
 
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, coherence_map, viz_callback=None):
-        """Finds the optimal path between two points using the A* algorithm.
+    def _normalize_vector(self, v):
+        """Normalizes a 2D vector to a unit vector."""
+        norm = np.linalg.norm(v)
+        return v / (norm + 1e-6) # Add epsilon to avoid division by zero
 
-        This implementation is heavily guided by a pre-computed path coherence map,
-        which encodes penalties for turns and brightness changes relative to the
-        start point. It also includes costs for distance, time, and jumping
-        between different vessel structures.
+    def _get_junction_penalties(self, current, parent, identity_map):
+        """Analyzes a junction to assign penalties to turning branches.
+
+        This method identifies all possible forward paths from a junction point,
+        uses `_scout_branch` to evaluate the straightness of each path, and
+        assigns a penalty to all paths except for the straightest one.
+
+        Args:
+            current: The current node (the junction point).
+            parent: The node from which we arrived at the junction.
+            identity_map: The vessel identity map, used to get the mask.
+
+        Returns:
+            A dictionary where keys are the neighbor nodes starting each branch
+            and values are the calculated penalties for taking that branch. The
+            straightest branch will have a penalty of 0.
+        """
+        mask = identity_map > 0
+        neighbors = []
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0: continue
+                neighbor = (current[0] + dr, current[1] + dc)
+                if not (0 <= neighbor[0] < mask.shape[0] and 0 <= neighbor[1] < mask.shape[1]) or \
+                   mask[neighbor] == 0 or neighbor == parent:
+                    continue
+                neighbors.append(neighbor)
+
+        if len(neighbors) <= 1:
+            return {} # Not a junction
+
+        branch_scores = {}
+        for neighbor in neighbors:
+            score = self._scout_branch(neighbor, current, identity_map)
+            branch_scores[neighbor] = score
+
+        if not branch_scores:
+            return {}
+
+        # Find the best branch (highest straightness score)
+        best_branch_node = max(branch_scores, key=branch_scores.get)
+
+        penalties = {}
+        for node, score in branch_scores.items():
+            if node != best_branch_node:
+                # Penalize based on how much it deviates from a straight path
+                penalty = self.TURN_PENALTY_WEIGHT * 5 * (1.0 - score)
+                penalties[node] = penalty
+
+        return penalties
+
+    def _scout_branch(self, start_node, parent_node, identity_map, scout_distance=15):
+        """Scouts a short distance down a branch to determine its straightness.
+
+        This function "walks" a short distance down a path from a junction to
+        evaluate how much it turns. It does this by repeatedly choosing the
+        next pixel that is most aligned with the current direction of travel.
+        It returns the average cosine similarity of its path segments relative
+        to the initial direction, which serves as a "straightness score".
+
+        Args:
+            start_node: The first node of the branch to scout.
+            parent_node: The node just before the junction, used to determine
+                         the initial direction of entry.
+            identity_map: The vessel identity map, used to get the mask.
+            scout_distance: The number of pixels to scout down the branch.
+
+        Returns:
+            A float between 0.0 and 1.0 representing the straightness score.
+            A score of 1.0 means the path is perfectly straight. A lower score
+            indicates a turn. Returns 0.0 if the path is invalid.
+        """
+        mask = identity_map > 0
+        v_initial = self._normalize_vector(np.array(start_node) - np.array(parent_node))
+
+        path = [parent_node, start_node]
+        similarities = []
+
+        for _ in range(scout_distance):
+            current_node = path[-1]
+            prev_node = path[-2]
+
+            v_current = self._normalize_vector(np.array(current_node) - np.array(prev_node))
+
+            best_neighbor = None
+            max_similarity = -2.0  # Cosine similarity ranges from -1 to 1
+
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0: continue
+                    neighbor = (current_node[0] + dr, current_node[1] + dc)
+
+                    if not (0 <= neighbor[0] < mask.shape[0] and 0 <= neighbor[1] < mask.shape[1]) or \
+                       mask[neighbor] == 0 or neighbor == prev_node:
+                        continue
+
+                    v_neighbor = self._normalize_vector(np.array(neighbor) - np.array(current_node))
+
+                    similarity = np.dot(v_current, v_neighbor)
+                    if similarity > max_similarity:
+                        max_similarity = similarity
+                        best_neighbor = neighbor
+
+            if best_neighbor is None:
+                break # End of branch
+
+            path.append(best_neighbor)
+
+            # Compare the new segment's direction with the initial direction
+            v_segment = self._normalize_vector(np.array(best_neighbor) - np.array(current_node))
+            initial_similarity = np.dot(v_initial, v_segment)
+            similarities.append(max(0, initial_similarity)) # Penalize sharp turns heavily
+
+        if not similarities:
+            return 0.0
+
+        return np.mean(similarities)
+
+    def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None):
+        """Finds the optimal path between two points using a modified A* algorithm.
+
+        This implementation of A* is heavily customized for this application.
+        The cost function for traversing from one pixel to another includes:
+        - The standard movement cost (distance).
+        - A temporal cost, derived from the frame number of the pixel.
+        - A high penalty for crossing between different vessel identities.
+        - A standard local turn penalty to encourage smooth paths.
 
         Args:
             cost_map: The base cost map (incorporating temporal cost).
             start: The starting (y, x) coordinate tuple.
             end: The ending (y, x) coordinate tuple.
             vessel_identity_map: The map assigning a unique ID to each vessel.
-            coherence_map: A map of path coherence scores from the start point.
-            viz_callback: An optional function to call for visualizing the search.
+            viz_callback: An optional function called periodically during the
+                          search to provide a visualization of the process.
 
         Returns:
-            A list of (y, x) tuples representing the path, or None if no path is found.
+            A list of (y, x) tuples representing the path from start to end,
+            or `None` if no path is found.
         """
         if cost_map[start] >= self.PATHFINDING_OBSTACLE_COST or cost_map[end] >= self.PATHFINDING_OBSTACLE_COST:
             return None
@@ -2041,6 +2180,8 @@ class VesselTracerApp(QMainWindow):
             if viz_callback and node_counter % viz_interval == 0:
                 viz_callback(list(g_costs.keys()))
 
+            parent = came_from.get(current)
+            junction_penalties = self._get_junction_penalties(current, parent, vessel_identity_map) if parent else {}
 
             for dr in [-1, 0, 1]:
                 for dc in [-1, 0, 1]:
@@ -2067,11 +2208,7 @@ class VesselTracerApp(QMainWindow):
                         if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
                             cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
 
-                    # 4. Coherence cost (higher coherence = lower cost)
-                    # This now implicitly handles turn penalties relative to the start point.
-                    coherence_cost = self.COHERENCE_MAP_WEIGHT * (1.0 - coherence_map[neighbor])
-
-                    # 5. Standard Turn Penalty (still useful for local smoothness)
+                    # 4. Standard Turn Penalty (still useful for local smoothness)
                     turn_penalty = 0
                     parent = came_from.get(current)
                     if parent:
@@ -2085,7 +2222,9 @@ class VesselTracerApp(QMainWindow):
                             cosine_similarity = min(1.0, max(-1.0, dot / (mag_in * mag_out)))
                             turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
 
-                    new_g_cost = g_costs[current] + move_cost + time_cost + cross_vessel_penalty + coherence_cost + turn_penalty
+                    junction_penalty = junction_penalties.get(neighbor, 0)
+
+                    new_g_cost = g_costs[current] + move_cost + time_cost + cross_vessel_penalty + turn_penalty + junction_penalty
 
                     if new_g_cost < g_costs.get(neighbor, np.inf):
                         g_costs[neighbor] = new_g_cost
@@ -2096,17 +2235,19 @@ class VesselTracerApp(QMainWindow):
         return None
 
     def find_closest_pixel_on_mask(self, point: QPoint, mask_img: np.ndarray) -> Optional[Tuple[int, int]]:
-        """Finds the closest white pixel on a binary mask to a given point.
+        """Finds the closest "on" pixel on a binary mask to a given point.
 
-        The search is limited to a maximum radius defined by `MAX_NODE_SEARCH_RADIUS`.
+        This function is used to snap a user's click to the nearest actual
+        vessel pixel in the generated mask. The search is limited to a maximum
+        radius defined by `MAX_NODE_SEARCH_RADIUS`.
 
         Args:
             point: The QPoint (in image coordinates) to search from.
-            mask_img: The binary mask to search within.
+            mask_img: The binary mask (where vessel pixels are > 0) to search.
 
         Returns:
-            A tuple (y, x) of the closest mask pixel, or None if no pixel is
-            found within the search radius.
+            A tuple (y, x) of the closest mask pixel's coordinates, or `None`
+            if no mask pixel is found within the search radius.
         """
         if mask_img is None or np.sum(mask_img) == 0: return None
 
@@ -2123,7 +2264,12 @@ class VesselTracerApp(QMainWindow):
             return None
 
     def reset_system(self):
-        """Resets all application states, data, and UI elements to their initial values."""
+        """Resets all application state and data to their initial values.
+
+        This method is called when the "Reset" button is clicked or when a new
+        folder is loaded. It clears all loaded images, masks, points, and other
+        data, returning the application to the `IDLE` state.
+        """
         self.images = []
         self.global_background_color = 255
         self.vessel_masks = None
@@ -2152,15 +2298,17 @@ class VesselTracerApp(QMainWindow):
         """Displays a NumPy array image in the main image label.
 
         Args:
-            image_data: The image to display.
+            image_data: The NumPy array containing the image to display.
         """
         pixmap = self.convert_np_to_pixmap(image_data)
         self.image_label.setPixmap(pixmap)
 
     def convert_np_to_pixmap(self, image_data: np.ndarray) -> QPixmap:
-        """Converts a NumPy array image to a QPixmap for display.
+        """Converts a NumPy array image to a QPixmap for display in Qt.
 
-        Handles grayscale, BGR, and BGRA images.
+        This helper function handles the conversion of different NumPy image
+        formats (grayscale, BGR, BGRA) into a `QPixmap` that can be used by
+        `QLabel`.
 
         Args:
             image_data: The input image as a NumPy array.
@@ -2190,11 +2338,11 @@ class VesselTracerApp(QMainWindow):
 
         return QPixmap.fromImage(q_image) if q_image else QPixmap()
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: 'QCloseEvent'):
         """Handles the application close event to ensure clean shutdown.
 
         Args:
-            event: The QCloseEvent.
+            event: The QCloseEvent provided by Qt.
         """
         self.reset_system()
         event.accept()
