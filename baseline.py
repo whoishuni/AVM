@@ -354,7 +354,7 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
-def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, main_vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
+def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, main_vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp', viz_callback=None) -> np.ndarray:
     """Generates a map where each pixel's value represents path coherence from a start node.
 
     This is done using a Dijkstra-like search where the 'cost' is a measure of
@@ -367,6 +367,7 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
         main_vessel_mask: A binary mask identifying the thickest "trunk" vessels.
         original_mip: The original MIP image, used for brightness checks.
         app_instance: The main application instance to access parameters.
+        viz_callback: An optional function to call for visualizing the search.
 
     Returns:
         A float32 NumPy array representing the coherence map.
@@ -379,11 +380,18 @@ def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.nda
     pq = [(0, start_node)]  # (cost, (y, x))
     came_from = {}
 
+    node_counter = 0
+    viz_interval = 100 # Update visualization every 100 nodes
+
     while pq:
         cost, current = heapq.heappop(pq)
 
         if cost > costs[current]:
             continue
+
+        node_counter += 1
+        if viz_callback and node_counter % viz_interval == 0:
+            viz_callback(list(came_from.keys()))
 
         parent = came_from.get(current)
 
@@ -558,6 +566,7 @@ class DrawingMode(Enum):
 class AnalysisWorker(QThread):
     """A QThread worker for running analysis tasks in the background."""
     analysis_complete = pyqtSignal(dict)
+    visualization_update = pyqtSignal(dict)
 
     def __init__(self, app_instance, start_point):
         super().__init__()
@@ -582,8 +591,27 @@ class AnalysisWorker(QThread):
             self.analysis_complete.emit(results)
             return
 
+        # Create base image for the animation from the generated mask
+        base_anim_img = cv2.cvtColor(self.app.base_mask_projection, cv2.COLOR_GRAY2BGR)
+
+        # Define the callback for visualization
+        def viz_callback(visited_nodes):
+            if self.is_running:
+                viz_data = {
+                    "base_image": base_anim_img,
+                    "visited": visited_nodes
+                }
+                self.visualization_update.emit(viz_data)
+
         full_range_mip = create_maximum_intensity_projection(self.app.images)
-        coherence_map = generate_path_coherence_map(start_node, self.app.base_mask_projection, self.app.main_vessel_mask, full_range_mip, self.app)
+        coherence_map = generate_path_coherence_map(
+            start_node,
+            self.app.base_mask_projection,
+            self.app.main_vessel_mask,
+            full_range_mip,
+            self.app,
+            viz_callback=viz_callback
+        )
 
         results["success"] = True
         results["coherence_map"] = coherence_map
@@ -1411,12 +1439,13 @@ class VesselTracerApp(QMainWindow):
         if not self.path_points_info:
             self.app_state = AppState.PROCESSING
             self.update_ui_for_state()
-            self.info_label.setText("First point marked. Running background pre-analysis of vessel structure...")
+            self.info_label.setText("First point marked. Running pre-analysis search, please wait...")
 
             # Store the point temporarily so the worker can access it
             self.path_points_info.append({"point": point, "frame": self.current_frame_index})
 
             self.active_thread = AnalysisWorker(self, point)
+            self.active_thread.visualization_update.connect(self.update_pre_analysis_view)
             self.active_thread.analysis_complete.connect(self.on_pre_analysis_complete)
             self.active_thread.start()
         else:
@@ -1425,6 +1454,24 @@ class VesselTracerApp(QMainWindow):
             self.path_points_info.sort(key=lambda p: p['frame'])
             self.update_frame_display(self.current_frame_index)
             self.update_ui_for_state()
+
+    def update_pre_analysis_view(self, viz_data: dict):
+        """Updates the image display with the pre-analysis animation frame."""
+        base_image = viz_data.get("base_image")
+        visited_nodes = viz_data.get("visited", [])
+
+        if base_image is None:
+            return
+
+        temp_img = base_image.copy()
+
+        # Draw visited nodes in a distinct color (e.g., blue for exploration)
+        for node in visited_nodes:
+            # node is (y, x), but cv2.circle wants (x, y)
+            cv2.circle(temp_img, (node[1], node[0]), 1, (255, 100, 100), -1)
+
+        self.display_image(temp_img)
+        QApplication.processEvents()
 
     def on_pre_analysis_complete(self, results: dict):
         """Handles the completion of the background pre-analysis task."""
