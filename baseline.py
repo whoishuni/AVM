@@ -563,8 +563,11 @@ class AnalysisWorker(QThread):
     def run(self):
         """Runs the analysis pipeline."""
         results = {"success": False}
+        # Call prepare_and_generate_masks without a worker_thread to prevent UI creation
         if self.app.base_mask_projection is None:
-            if not self.app.prepare_and_generate_masks():
+            # Pass worker_thread=None to prevent UI creation from background thread
+            if not self.app.prepare_and_generate_masks(worker_thread=None):
+                results["error"] = "Mask generation was canceled or failed during pre-analysis."
                 self.analysis_complete.emit(results)
                 return
 
@@ -1402,7 +1405,7 @@ class VesselTracerApp(QMainWindow):
         if not self.path_points_info:
             self.app_state = AppState.PROCESSING
             self.update_ui_for_state()
-            self.info_label.setText("Processing... preparing for pre-analysis.")
+            self.info_label.setText("First point marked. Running background pre-analysis of vessel structure...")
 
             # Store the point temporarily so the worker can access it
             self.path_points_info.append({"point": point, "frame": self.current_frame_index})
@@ -1541,7 +1544,7 @@ class VesselTracerApp(QMainWindow):
                 self.update_ui_for_state()
 
     def show_segmented_path_preview(self):
-        """Shows a preview of the generated vessel mask."""
+        """Shows a preview of the generated vessel mask, with a progress dialog."""
         if self.app_state != AppState.RANGE_CONFIRMED: return
 
         if self.base_mask_projection is not None:
@@ -1549,40 +1552,48 @@ class VesselTracerApp(QMainWindow):
             self.statusBar().showMessage("Showing cached vessel mask.")
             return
 
-        if self.prepare_and_generate_masks():
+        # This is a user-facing action, so create a progress dialog.
+        frame_range = self._get_frame_range(for_processing=True)
+        if not frame_range: return
+        num_images = frame_range[1] - frame_range[0] + 1
+
+        progress = QProgressDialog("Generating vessel masks...", "Cancel", 0, num_images, self)
+        progress.setWindowModality(Qt.WindowModal)
+        updater = ProgressUpdater(progress)
+
+        was_successful = self.prepare_and_generate_masks(worker_thread=updater)
+        progress.close() # Ensure dialog is closed regardless of outcome
+
+        if was_successful:
             self.display_image(self.overlay_points_on_image(self.base_mask_projection))
             self.statusBar().showMessage("Vessel mask generated and displayed.")
-        else:
+        elif updater.is_running: # Don't show error if user canceled
             QMessageBox.warning(self, "Error", "Failed to generate vessel mask.")
 
-    def prepare_and_generate_masks(self) -> bool:
+    def prepare_and_generate_masks(self, worker_thread: Optional['ProgressUpdater'] = None) -> bool:
         """Prepares and generates all derived data like masks and cost maps.
 
-        This function runs the main pre-processing pipeline, including generating
-        the binary vessel masks, the temporal cost map, and the vessel identity map.
+        This function runs the main pre-processing pipeline. It can be run with
+        a ProgressUpdater to show a dialog, or without for silent background processing.
+
+        Args:
+            worker_thread: An optional updater to report progress to a UI dialog.
 
         Returns:
-            True if mask generation was successful, False otherwise.
+            True if mask generation was successful and not canceled, False otherwise.
         """
-        # Core requirement: processing range always starts from frame 0
         frame_range = self._get_frame_range(for_processing=True)
         if not frame_range:
             return False
         start_f, end_f = frame_range
 
         images_subset = self.images[start_f: end_f + 1]
-
-        progress = QProgressDialog("Generating vessel masks...", "Cancel", 0, len(images_subset), self)
-        progress.setWindowModality(Qt.WindowModal)
-        updater = ProgressUpdater(progress)
-
         dominant_bg_color = self.global_background_color
 
         masks = create_enhanced_vessel_masks(images_subset, self.noise_rois, dominant_bg_color, self,
-                                             self.smoothing_level, updater)
-        progress.close()
+                                             self.smoothing_level, worker_thread)
 
-        if masks and updater.is_running:
+        if masks and (worker_thread is None or worker_thread.is_running):
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
             self.main_vessel_mask = identify_main_vessels(self.base_mask_projection, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
@@ -1590,6 +1601,7 @@ class VesselTracerApp(QMainWindow):
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, self.main_vessel_mask)
             return True
         else:
+            # Clear caches if generation fails or is canceled
             self.vessel_masks = None
             self.base_mask_projection = None
             self.temporal_cost_map = None
@@ -1691,8 +1703,22 @@ class VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
         if self.base_mask_projection is None or self.temporal_cost_map is None:
-            if not self.prepare_and_generate_masks():
-                QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
+            # This is a user-facing action, so create a progress dialog.
+            frame_range = self._get_frame_range(for_processing=True)
+            if not frame_range:
+                self.app_state = AppState.RANGE_CONFIRMED; self.update_ui_for_state(); return
+            num_images = frame_range[1] - frame_range[0] + 1
+
+            progress = QProgressDialog("Generating vessel masks for analysis...", "Cancel", 0, num_images, self)
+            progress.setWindowModality(Qt.WindowModal)
+            updater = ProgressUpdater(progress)
+
+            was_successful = self.prepare_and_generate_masks(worker_thread=updater)
+            progress.close()
+
+            if not was_successful:
+                if updater.is_running: # Don't show error if user canceled
+                    QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
                 self.app_state = AppState.RANGE_CONFIRMED
                 self.update_ui_for_state()
                 return
