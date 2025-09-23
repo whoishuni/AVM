@@ -450,32 +450,89 @@ def identify_main_vessels(mask: np.ndarray, thickness_threshold: int) -> np.ndar
     return main_vessels_mask.astype(np.uint8)
 
 
-def create_junction_map(mask: np.ndarray) -> np.ndarray:
-    """Creates a map of junction points from a vessel mask.
+def generate_path_coherence_map(start_node: Tuple[int, int], vessel_mask: np.ndarray, original_mip: np.ndarray, app_instance: 'VesselTracerApp') -> np.ndarray:
+    """Generates a map where each pixel's value represents path coherence from a start node.
 
-    Junctions are points on the vessel skeleton that have 3 or more neighbors,
-    indicating a bifurcation or crossing.
+    This is done using a Dijkstra-like search where the 'cost' is a measure of
+    'incoherence', penalizing turns and changes in brightness. The final map
+    is an inverse of these costs, so high values mean high coherence.
 
     Args:
-        mask: A binary mask of the entire vessel structure.
+        start_node: The (y, x) starting point for the exploration.
+        vessel_mask: The binary mask of all vessels.
+        original_mip: The original MIP image, used for brightness checks.
+        app_instance: The main application instance to access parameters.
 
     Returns:
-        A binary map where junction pixels are marked as 255.
+        A float32 NumPy array representing the coherence map.
     """
-    if mask is None or np.sum(mask) == 0:
-        return np.zeros_like(mask)
+    if vessel_mask[start_node] == 0:
+        return np.zeros(vessel_mask.shape, dtype=np.float32)
 
-    skeleton = skeletonize(mask / 255).astype(np.uint8)
+    costs = np.full(vessel_mask.shape, np.inf, dtype=np.float32)
+    costs[start_node] = 0
+    pq = [(0, start_node)]  # (cost, (y, x))
+    came_from = {}
 
-    # Use convolution to count neighbors for each skeleton pixel
-    kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.uint8)
-    neighbor_map = cv2.filter2D(skeleton, -1, kernel, borderType=cv2.BORDER_CONSTANT)
+    while pq:
+        cost, current = heapq.heappop(pq)
 
-    # Junctions are skeleton points with 3 or more neighbors
-    junction_map = np.zeros_like(mask)
-    junction_map[(skeleton > 0) & (neighbor_map >= 3)] = 255
+        if cost > costs[current]:
+            continue
 
-    return junction_map
+        parent = came_from.get(current)
+
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0: continue
+
+                neighbor = (current[0] + dr, current[1] + dc)
+
+                if not (0 <= neighbor[0] < vessel_mask.shape[0] and 0 <= neighbor[1] < vessel_mask.shape[1]) or \
+                   vessel_mask[neighbor] == 0:
+                    continue
+
+                # Calculate incoherence cost for this step
+                incoherence = 0
+
+                # 1. Turn penalty
+                if parent:
+                    v_in = (current[0] - parent[0], current[1] - parent[1])
+                    v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
+                    mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
+                    mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
+                    if mag_in > 0 and mag_out > 0:
+                        dot = v_in[0] * v_out[0] + v_in[1] * v_out[1]
+                        cosine_similarity = dot / (mag_in * mag_out)
+                        incoherence += app_instance.COHERENCE_TURN_PENALTY * (1.0 - cosine_similarity)
+
+                # 2. Color/Intensity change penalty
+                color_diff = abs(int(original_mip[current]) - int(original_mip[neighbor]))
+                incoherence += app_instance.COHERENCE_COLOR_CHANGE_PENALTY * (color_diff / 255.0)
+
+                # 3. Movement cost
+                move_cost = math.sqrt(dr**2 + dc**2)
+
+                new_cost = costs[current] + move_cost + incoherence
+                if new_cost < costs[neighbor]:
+                    costs[neighbor] = new_cost
+                    came_from[neighbor] = current
+                    heapq.heappush(pq, (new_cost, neighbor))
+
+    # Convert costs to a coherence map (inverse relationship, handle inf)
+    coherence_map = np.zeros_like(costs)
+    valid_costs = costs[costs != np.inf]
+    if len(valid_costs) > 0:
+        max_cost = np.max(valid_costs)
+        # Invert cost to get coherence, adding epsilon to avoid division by zero
+        coherence_map[costs != np.inf] = max_cost - costs[costs != np.inf]
+
+    # Normalize to 0-1 range
+    min_val, max_val = np.min(coherence_map), np.max(coherence_map)
+    if max_val > min_val:
+        coherence_map = (coherence_map - min_val) / (max_val - min_val)
+
+    return coherence_map
 
 
 # --- State Management Enums ---
@@ -901,8 +958,10 @@ class VesselTracerApp(QMainWindow):
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
     MAIN_VESSEL_THICKNESS_THRESHOLD = 5 # Radius in pixels to be considered a main vessel
-    MAIN_TO_BRANCH_PENALTY = 200.0 # Penalty for turning off a main vessel into a branching zone
-    BRANCH_EXPLORATION_RADIUS = 15 # Search radius for finding nearby junctions
+    # --- Coherence Map Parameters ---
+    COHERENCE_TURN_PENALTY = 5.0
+    COHERENCE_COLOR_CHANGE_PENALTY = 10.0
+    COHERENCE_MAP_WEIGHT = 50.0
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -918,7 +977,7 @@ class VesselTracerApp(QMainWindow):
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
         self.main_vessel_mask: Optional[np.ndarray] = None # Added: Mask for main vessels
-        self.junction_map: Optional[np.ndarray] = None # Added: Map of vessel junctions
+        self.path_coherence_map: Optional[np.ndarray] = None # Added: Map of path coherence from start point
         self.noise_rois: List[QRect] = []
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
@@ -1112,7 +1171,7 @@ class VesselTracerApp(QMainWindow):
             },
             AppState.MARKING_PATH: {
                 "main_action_text": "Confirm Points", "main_action_enabled": len(self.path_points_info) >= 2,
-                "info_text": f"Marked {len(self.path_points_info)} points. Use 'A' and 'D' to switch frames.",
+                "info_text": (f"Start point set. Pre-analysis complete. Please mark your end point." if len(self.path_points_info) == 1 else f"Marked {len(self.path_points_info)} points. Click 'Confirm Points' when done."),
                 "status_text": "Marking path...",
                 "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False
             },
@@ -1296,16 +1355,46 @@ class VesselTracerApp(QMainWindow):
     def handle_point_selection(self, point: QPoint):
         """Handles a point selection event from the ImageLabel.
 
-        Adds the selected point and its frame index to the list of path points.
+        If it's the first point, it triggers the coherence map pre-analysis.
+        Otherwise, it just adds the point to the list.
 
         Args:
             point: The QPoint where the user clicked, in image coordinates.
         """
-        if self.app_state == AppState.MARKING_PATH:
+        if self.app_state != AppState.MARKING_PATH:
+            return
+
+        # --- New Workflow: Pre-analysis on first point ---
+        if not self.path_points_info:
+            # This is the first point (the start point).
+            # We need to generate the base masks first to find the real start node.
+            if self.base_mask_projection is None:
+                if not self.prepare_and_generate_masks():
+                    QMessageBox.warning(self, "Mask Generation Failed", "Could not generate a vessel mask. Cannot proceed.")
+                    return
+
+            start_node = self.find_closest_pixel_on_mask(point, self.base_mask_projection)
+            if not start_node:
+                QMessageBox.warning(self, "Point Not on Vessel", "The selected start point is not close enough to a vessel.")
+                return
+
+            self.info_label.setText("Processing... generating coherence map from start point.")
+            QApplication.processEvents()
+
+            # For the coherence map, we need an original image MIP of the full range
+            full_range_mip = create_maximum_intensity_projection(self.images)
+            self.path_coherence_map = generate_path_coherence_map(start_node, self.base_mask_projection, full_range_mip, self)
+
+            # Now that pre-analysis is done, add the point and update UI
+            self.path_points_info.append({"point": point, "frame": self.current_frame_index, "node": start_node})
+            self.info_label.setText("Start point set. Pre-analysis complete. Please mark your end point.")
+        else:
+            # This is a subsequent point (middle or end).
             self.path_points_info.append({"point": point, "frame": self.current_frame_index})
-            self.path_points_info.sort(key=lambda p: p['frame'])
-            self.update_frame_display(self.current_frame_index)
-            self.update_ui_for_state()
+
+        self.path_points_info.sort(key=lambda p: p['frame'])
+        self.update_frame_display(self.current_frame_index)
+        self.update_ui_for_state()
 
     def _get_frame_range(self, for_processing: bool = False) -> Optional[Tuple[int, int]]:
         """Gets the frame range defined by the earliest and latest marked points.
@@ -1446,7 +1535,6 @@ class VesselTracerApp(QMainWindow):
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
             self.main_vessel_mask = identify_main_vessels(self.base_mask_projection, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
-            self.junction_map = create_junction_map(self.base_mask_projection)
             self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.PATHFINDING_OBSTACLE_COST)
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, self.main_vessel_mask)
             return True
@@ -1456,7 +1544,6 @@ class VesselTracerApp(QMainWindow):
             self.temporal_cost_map = None
             self.vessel_identity_map = None
             self.main_vessel_mask = None
-            self.junction_map = None
             return False
 
     def generate_mask_steps(self, image: np.ndarray, smoothing_level: int) -> List[Tuple[np.ndarray, str]]:
@@ -1568,9 +1655,11 @@ class VesselTracerApp(QMainWindow):
             self.update_ui_for_state()
             return
 
-        mask_pixels = []
+        # The start node was already found during pre-analysis.
+        mask_pixels = [self.path_points_info[0]["node"]]
         all_pixels_found = True
-        for p_info in self.path_points_info:
+        # Find subsequent points
+        for p_info in self.path_points_info[1:]:
             pixel = self.find_closest_pixel_on_mask(p_info["point"], final_mask)
             if pixel:
                 mask_pixels.append(pixel)
@@ -1607,7 +1696,7 @@ class VesselTracerApp(QMainWindow):
         pixels = anim_data["pixels"]
         base_image = anim_data["baseimage"]
         identity_map = anim_data["identity_map"]
-        junction_map = anim_data["junction_map"]
+        coherence_map = anim_data["coherence_map"]
 
         def update_visualization(visited):
             temp_img = base_image.copy()
@@ -1627,19 +1716,11 @@ class VesselTracerApp(QMainWindow):
                 cv2.circle(current_costmap, (prev_node[1], prev_node[0]), self.FORBIDDEN_ZONE_RADIUS,
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
-            # The final mask is needed for the straight path probe
-            final_mask = cv2.threshold(anim_data["baseimage"], 1, 255, cv2.THRESH_BINARY)[1]
-            if len(final_mask.shape) > 2: # Ensure it's grayscale
-                final_mask = cv2.cvtColor(final_mask, cv2.COLOR_BGR2GRAY)
-
-            # Recreate main vessel mask on the fly for the replay
-            main_vessel_mask = identify_main_vessels(final_mask, self.MAIN_VESSEL_THICKNESS_THRESHOLD)
-
-            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map, final_mask, main_vessel_mask, junction_map,
+            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map, coherence_map,
                                            viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
-                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map, final_mask, main_vessel_mask, junction_map,
+                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map, coherence_map,
                                                viz_callback=update_visualization)
 
             if segment:
@@ -1743,11 +1824,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, final_mask, self.main_vessel_mask, self.junction_map, viz_callback=None)
+            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, self.path_coherence_map, viz_callback=None)
 
             if segment is None:
                 # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, final_mask, self.main_vessel_mask, self.junction_map,
+                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map, self.path_coherence_map,
                                                viz_callback=None)
 
             if segment is None:
@@ -1782,7 +1863,7 @@ class VesselTracerApp(QMainWindow):
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
                      "baseimage": path_base_image, "identity_map": self.vessel_identity_map,
-                     "junction_map": self.junction_map}
+                     "coherence_map": self.path_coherence_map}
         steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
@@ -1830,61 +1911,20 @@ class VesselTracerApp(QMainWindow):
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius + 2, (0, 0, 0), -1)
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius, color, -1)
 
-    def _explore_for_branches(self, start_node: Tuple[int, int], vessel_mask: np.ndarray, junction_map: np.ndarray) -> bool:
-        """Performs a short-range BFS to check for nearby junctions.
-
-        Args:
-            start_node: The (y, x) point to start the search from.
-            vessel_mask: The binary mask of all vessels, defining valid search areas.
-            junction_map: The pre-computed map of junction locations.
-
-        Returns:
-            True if a junction is found within the exploration radius, False otherwise.
-        """
-        q = deque([(start_node, 0)])
-        visited = {start_node}
-
-        while q:
-            current_node, distance = q.popleft()
-
-            if distance >= self.BRANCH_EXPLORATION_RADIUS:
-                continue
-
-            # Check if the current node is a junction
-            if junction_map[current_node] > 0:
-                return True
-
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    if dr == 0 and dc == 0: continue
-
-                    neighbor = (current_node[0] + dr, current_node[1] + dc)
-
-                    if neighbor not in visited and \
-                       (0 <= neighbor[0] < vessel_mask.shape[0] and 0 <= neighbor[1] < vessel_mask.shape[1]) and \
-                       vessel_mask[neighbor] > 0:
-
-                        visited.add(neighbor)
-                        q.append((neighbor, distance + 1))
-
-        return False
-
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, final_mask, main_vessel_mask, junction_map, viz_callback=None):
+    def find_path_astar(self, cost_map, start, end, vessel_identity_map, coherence_map, viz_callback=None):
         """Finds the optimal path between two points using the A* algorithm.
 
-        This implementation includes costs for distance, time (frame index),
-        path curvature, and vessel identity jumps. It enforces a hard rule
-        to prioritize straight paths and adds a penalty for turning from a
-        main vessel into a branching zone.
+        This implementation is heavily guided by a pre-computed path coherence map,
+        which encodes penalties for turns and brightness changes relative to the
+        start point. It also includes costs for distance, time, and jumping
+        between different vessel structures.
 
         Args:
             cost_map: The base cost map (incorporating temporal cost).
             start: The starting (y, x) coordinate tuple.
             end: The ending (y, x) coordinate tuple.
             vessel_identity_map: The map assigning a unique ID to each vessel.
-            final_mask: The final binary vessel mask (used for bounds checking).
-            main_vessel_mask: A mask identifying the main vessel trunks.
-            junction_map: A map of all bifurcation/junction points.
+            coherence_map: A map of path coherence scores from the start point.
             viz_callback: An optional function to call for visualizing the search.
 
         Returns:
@@ -1897,8 +1937,8 @@ class VesselTracerApp(QMainWindow):
             return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
         open_set = [(heuristic(start, end), 0, start)]  # f_cost, g_cost, pos
-        came_from = {}
         g_costs = {start: 0}
+        came_from = {}
         closed_set = set()
 
         node_counter = 0
@@ -1909,7 +1949,7 @@ class VesselTracerApp(QMainWindow):
 
             if current == end:
                 if viz_callback:
-                    viz_callback(list(closed_set))
+                    viz_callback(list(g_costs.keys()))
                 path = []
                 while current in came_from:
                     path.append(current)
@@ -1922,93 +1962,59 @@ class VesselTracerApp(QMainWindow):
 
             node_counter += 1
             if viz_callback and node_counter % viz_interval == 0:
-                viz_callback(list(closed_set))
+                viz_callback(list(g_costs.keys()))
 
-            parent = came_from.get(current)
 
-            # --- Neighbor Categorization ---
-            straight_neighbors = []
-            turning_neighbors = []
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0: continue
+                    neighbor = (current[0] + dr, current[1] + dc)
 
-            if parent:
-                v_in = (current[0] - parent[0], current[1] - parent[1])
-                mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
+                    if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]) or \
+                            cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
+                            neighbor in closed_set:
+                        continue
 
-                for dr in [-1, 0, 1]:
-                    for dc in [-1, 0, 1]:
-                        if dr == 0 and dc == 0: continue
-                        neighbor = (current[0] + dr, current[1] + dc)
+                    # --- Cost Calculation ---
+                    # 1. Base movement cost
+                    move_cost = np.sqrt(dr**2 + dc**2)
 
-                        if not (0 <= neighbor[0] < final_mask.shape[0] and 0 <= neighbor[1] < final_mask.shape[1]) or \
-                                cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
-                                neighbor in closed_set:
-                            continue
+                    # 2. Temporal cost from pre-calculated map
+                    time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
 
+                    # 3. Vessel identity penalty
+                    cross_vessel_penalty = 0
+                    if vessel_identity_map is not None:
+                        current_id = vessel_identity_map[current]
+                        neighbor_id = vessel_identity_map[neighbor]
+                        if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
+                            cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
+
+                    # 4. Coherence cost (higher coherence = lower cost)
+                    # This now implicitly handles turn penalties relative to the start point.
+                    coherence_cost = self.COHERENCE_MAP_WEIGHT * (1.0 - coherence_map[neighbor])
+
+                    # 5. Standard Turn Penalty (still useful for local smoothness)
+                    turn_penalty = 0
+                    parent = came_from.get(current)
+                    if parent:
+                        v_in = (current[0] - parent[0], current[1] - parent[1])
                         v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
+                        mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
                         mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
-
                         if mag_in > 0 and mag_out > 0:
-                            dot_product = v_in[0] * v_out[0] + v_in[1] * v_out[1]
-                            cosine_similarity = dot_product / (mag_in * mag_out)
+                            dot = v_in[0] * v_out[0] + v_in[1] * v_out[1]
+                            # Clamp cosine to avoid math domain errors with float precision
+                            cosine_similarity = min(1.0, max(-1.0, dot / (mag_in * mag_out)))
+                            turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
 
-                            if cosine_similarity > 0.9:  # Angle < ~25 degrees
-                                straight_neighbors.append(neighbor)
-                            else:
-                                turning_neighbors.append(neighbor)
-                        else:
-                            turning_neighbors.append(neighbor) # Should not happen if mag_in > 0
+                    new_g_cost = g_costs[current] + move_cost + time_cost + cross_vessel_penalty + coherence_cost + turn_penalty
 
-            # If no parent (start node), all neighbors are effectively turning
-            if not parent:
-                for dr in [-1, 0, 1]:
-                    for dc in [-1, 0, 1]:
-                        if dr == 0 and dc == 0: continue
-                        neighbor = (current[0] + dr, current[1] + dc)
-                        if (0 <= neighbor[0] < final_mask.shape[0] and 0 <= neighbor[1] < final_mask.shape[1]) and \
-                           cost_map[neighbor] < self.PATHFINDING_OBSTACLE_COST and neighbor not in closed_set:
-                            turning_neighbors.append(neighbor)
-
-            # --- Hard Constraint Logic ---
-            neighbors_to_process = straight_neighbors if straight_neighbors else turning_neighbors
-
-            for neighbor in neighbors_to_process:
-                # --- Cost Calculation ---
-                move_cost = np.sqrt((neighbor[0] - current[0])**2 + (neighbor[1] - current[1])**2)
-                time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
-
-                cross_vessel_penalty = 0
-                if vessel_identity_map is not None:
-                    current_id = vessel_identity_map[current]
-                    neighbor_id = vessel_identity_map[neighbor]
-                    if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
-                        cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
-
-                turn_penalty = 0
-                main_to_branch_penalty = 0
-                if parent:
-                    v_in = (current[0] - parent[0], current[1] - parent[1])
-                    v_out = (neighbor[0] - current[0], neighbor[1] - current[1])
-                    mag_in = math.sqrt(v_in[0] ** 2 + v_in[1] ** 2)
-                    mag_out = math.sqrt(v_out[0] ** 2 + v_out[1] ** 2)
-                    if mag_in > 0 and mag_out > 0:
-                        dot_product = v_in[0] * v_out[0] + v_in[1] * v_out[1]
-                        cosine_similarity = dot_product / (mag_in * mag_out)
-                        turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
-
-                        # Check for main-to-branch transition
-                        is_on_main = main_vessel_mask[current] > 0
-                        is_turning = cosine_similarity < 0.9 # Angle > ~25 degrees
-                        if is_on_main and is_turning:
-                            if self._explore_for_branches(neighbor, final_mask, junction_map):
-                                main_to_branch_penalty = self.MAIN_TO_BRANCH_PENALTY
-
-                new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty + main_to_branch_penalty
-
-                if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
-                    g_costs[neighbor] = new_g_cost
-                    f_cost = new_g_cost + heuristic(neighbor, end)
-                    heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
-                    came_from[neighbor] = current
+                    if new_g_cost < g_costs.get(neighbor, np.inf):
+                        g_costs[neighbor] = new_g_cost
+                        f_cost = new_g_cost + heuristic(neighbor, end)
+                        heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
+                        came_from[neighbor] = current
 
         return None
 
@@ -2047,7 +2053,7 @@ class VesselTracerApp(QMainWindow):
         self.layered_vessel_mask = None
         self.vessel_identity_map = None
         self.main_vessel_mask = None
-        self.junction_map = None
+        self.path_coherence_map = None
         self.noise_rois = []
         self.drawing_mode = None
         self.final_paths = None
