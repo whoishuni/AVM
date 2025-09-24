@@ -1,17 +1,30 @@
 import sys
 import os
+<<<<<<< HEAD
+=======
+from typing import Optional
+>>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
 
 # Add the 'src' directory to the Python path to allow for absolute imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
+<<<<<<< HEAD
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from gui.main_window import YC_VesselTracerApp
+=======
+from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
+from gui.main_window import YC_VesselTracerApp
+from gui.language_dialog import YC_LanguageSelectionDialog
+>>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
 
 def main():
     """
     The main entry point for the YC_VesselTracer application.
     """
+<<<<<<< HEAD
     # Global exception hook to catch and display any uncaught errors gracefully.
+=======
+>>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
     def exception_hook(exctype, value, traceback):
         print(f"Uncaught exception: {exctype.__name__}, {value}")
         import traceback
@@ -28,7 +41,18 @@ def main():
 
     try:
         app = QApplication(sys.argv)
+<<<<<<< HEAD
         main_window = YC_VesselTracerApp()
+=======
+
+        lang_dialog = YC_LanguageSelectionDialog()
+        if lang_dialog.exec() == QDialog.DialogCode.Accepted:
+            language = lang_dialog.get_selected_language()
+        else:
+            language = "en"
+
+        main_window = YC_VesselTracerApp(language=language)
+>>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         main_window.show()
         sys.exit(app.exec())
     except ImportError as e:
