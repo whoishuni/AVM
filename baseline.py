@@ -670,7 +670,7 @@ class SmoothingPreviewDialog(QDialog):
             parent: The parent widget.
         """
         super().__init__(parent)
-        self.setWindowTitle("Smoothing Effect Preview")
+        self.setWindowTitle("YC Smoothing Preview")
         self.setMinimumSize(600, 500)
         self.base_image = base_image
         self.smoothing_level = initial_level
@@ -745,7 +745,7 @@ class StepViewerDialog(QDialog):
             parent: The parent widget.
         """
         super().__init__(parent)
-        self.setWindowTitle("Processing Step Viewer")
+        self.setWindowTitle("YC Processing Steps")
         self.setMinimumSize(800, 600)
         self.steps = steps
         self.main_window = main_window
@@ -829,7 +829,7 @@ class PlotlyViewerDialog(QDialog):
     """A dialog for displaying an interactive Plotly graph."""
     def __init__(self, html_content: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Interactive 3D View")
+        self.setWindowTitle("YC 3D View")
         self.setMinimumSize(900, 700)
 
         self.layout = QVBoxLayout(self)
@@ -905,7 +905,7 @@ class VesselTracerApp(QMainWindow):
     MAX_NODE_SEARCH_RADIUS = 50
     MAX_GAP_BRIDGE_DISTANCE = 30
     FORBIDDEN_ZONE_RADIUS = 30
-    TIME_COST_WEIGHT = 1.0
+    TIME_COST_WEIGHT = 0.01
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0
     CROSS_VESSEL_PENALTY = 1e6
@@ -915,7 +915,7 @@ class VesselTracerApp(QMainWindow):
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
         super().__init__()
-        self.setWindowTitle("YC血管追蹤2D")
+        self.setWindowTitle("YC_血管尋路")
         self.setGeometry(100, 100, 1280, 960)
         self.set_stylesheet()
 
@@ -1122,7 +1122,7 @@ class VesselTracerApp(QMainWindow):
 
         fig = go.Figure(data=plot_traces)
         fig.update_layout(
-            title_text='3D Vessel Reconstruction',
+            title_text='YC 3D Vessel Reconstruction',
             scene=dict(
                 xaxis_title='X (pixels)',
                 yaxis_title='Y (pixels)',
@@ -1640,7 +1640,7 @@ class VesselTracerApp(QMainWindow):
         pathfinding_costmap[final_mask > 0] = 0  # Base cost is 0
         pathfinding_costmap += cost_map  # Add time cost
 
-        self.show_full_analysis_steps(final_mask, mask_pixels, pathfinding_costmap)
+        self.show_full_analysis_steps(final_mask, mask_pixels, pathfinding_costmap, cost_map)
 
     def replay_path_animation(self, anim_data: dict):
         """Replays the A* pathfinding search animation from the step viewer.
@@ -1656,6 +1656,7 @@ class VesselTracerApp(QMainWindow):
         identity_map = anim_data["identity_map"]
         width_map = anim_data["width_map"]
         main_vessel_width = anim_data["main_vessel_width"]
+        temporal_cost_map = anim_data["temporal_cost_map"]
 
         def update_visualization(visited):
             temp_img = base_image.copy()
@@ -1676,11 +1677,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map,
-                                           width_map, main_vessel_width, viz_callback=update_visualization)
+                                           width_map, main_vessel_width, temporal_cost_map, viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
                 segment = self.find_path_astar(cost_map, start_node, end_node, identity_map,
-                                               width_map, main_vessel_width, viz_callback=update_visualization)
+                                               width_map, main_vessel_width, temporal_cost_map, viz_callback=update_visualization)
 
             if segment:
                 full_path.extend(segment if i == 0 else segment[1:])
@@ -1691,7 +1692,7 @@ class VesselTracerApp(QMainWindow):
         self.display_image(base_image)
         self.statusBar().showMessage("Animation replay finished.", 3000)
 
-    def show_full_analysis_steps(self, final_mask, mask_pixels, pathfinding_costmap):
+    def show_full_analysis_steps(self, final_mask, mask_pixels, pathfinding_costmap, temporal_cost_map):
         """Prepares and shows the final step-by-step analysis results dialog.
 
         This method assembles all visualization steps, runs the final A*
@@ -1789,7 +1790,7 @@ class VesselTracerApp(QMainWindow):
 
                 # Use the cumulative cost map for each segment search
                 segment = self.find_path_astar(cumulative_cost_map, segment_start_node, segment_end_node, combined_identity_map,
-                                               width_map, main_vessel_width, viz_callback=None)
+                                               width_map, main_vessel_width, temporal_cost_map, viz_callback=None)
 
                 if segment:
                     # Extend the full path, avoiding duplicate points between segments
@@ -1838,7 +1839,8 @@ class VesselTracerApp(QMainWindow):
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
                      "baseimage": path_base_image, "identity_map": combined_identity_map,
-                     "width_map": width_map, "main_vessel_width": main_vessel_width}
+                     "width_map": width_map, "main_vessel_width": main_vessel_width,
+                     "temporal_cost_map": temporal_cost_map}
         steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
@@ -2000,7 +2002,7 @@ class VesselTracerApp(QMainWindow):
 
         return traces
 
-    def find_path_astar(self, cost_map, start, end, identity_map, width_map, main_vessel_width, viz_callback=None):
+    def find_path_astar(self, cost_map, start, end, identity_map, width_map, main_vessel_width, temporal_cost_map, viz_callback=None):
         """Finds the optimal path between two points using a modified Dijkstra's algorithm.
 
         This implementation includes costs for distance, time (frame index),
@@ -2014,6 +2016,7 @@ class VesselTracerApp(QMainWindow):
             identity_map: The map assigning a unique ID to each vessel segment.
             width_map: A map where pixel values correspond to vessel width.
             main_vessel_width: The characteristic width of the main vessel.
+            temporal_cost_map: The map storing the frame index for each pixel.
             viz_callback: An optional function to call for visualizing the search.
 
         Returns:
@@ -2059,6 +2062,13 @@ class VesselTracerApp(QMainWindow):
                             cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
                             neighbor in closed_set:
                         continue
+
+                    # --- Directional Constraint: Prevent moving to an earlier frame ---
+                    if temporal_cost_map is not None:
+                        current_frame = int(temporal_cost_map[current[0], current[1]])
+                        neighbor_frame = int(temporal_cost_map[neighbor[0], neighbor[1]])
+                        if neighbor_frame < current_frame:
+                            continue  # Do not allow moving backward in time
 
                     # --- Dynamic Penalties based on Vessel Type (Main vs. Side) ---
                     neighbor_width = 2 * width_map[neighbor]
