@@ -19,13 +19,15 @@ try:
     import cv2
     from skimage.morphology import skeletonize
     from skimage.filters import frangi, sato, meijering
+    import plotly.graph_objects as go
+    from PyQt5.QtWebEngineWidgets import QWebEngineView
 except ImportError as e:
     # If a library is missing, create a simple QApplication to show an error message
     app = QApplication([])
     msg_box = QMessageBox()
     msg_box.setIcon(QMessageBox.Critical)
     msg_box.setText(f"Missing required Python library: {e.name}")
-    msg_box.setInformativeText("Please install it using: 'pip install numpy opencv-python scikit-image PyQt5 scikit-learn'")
+    msg_box.setInformativeText("Please install it using: 'pip install numpy opencv-python scikit-image PyQt5 scikit-learn plotly PyQtWebEngine'")
     msg_box.setWindowTitle("Dependency Error")
     msg_box.exec_()
     sys.exit(1)
@@ -779,6 +781,25 @@ class StepViewerDialog(QDialog):
         super().resizeEvent(event)
 
 
+class PlotlyViewerDialog(QDialog):
+    """A dialog for displaying an interactive Plotly graph."""
+    def __init__(self, html_content: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Interactive 3D View")
+        self.setMinimumSize(900, 700)
+
+        self.layout = QVBoxLayout(self)
+        self.webview = QWebEngineView()
+        self.layout.addWidget(self.webview)
+
+        self.webview.setHtml(html_content)
+
+        # Add a close button
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        self.layout.addWidget(self.button_box)
+        self.button_box.rejected.connect(self.reject)
+
+
 class ProgressUpdater:
     """A helper class to update a QProgressDialog from a background thread.
 
@@ -862,6 +883,7 @@ class VesselTracerApp(QMainWindow):
         self.drawing_mode: Optional[DrawingMode] = None
         self.active_thread: Optional[QThread] = None
         self.final_paths: Optional[List[List[Tuple[int, int]]]] = None
+        self.alternative_paths: Optional[List[List[Tuple[int, int]]]] = None
         self.final_path_image: Optional[np.ndarray] = None
         self.base_mask_projection: Optional[np.ndarray] = None
         self.temporal_cost_map: Optional[np.ndarray] = None
@@ -980,9 +1002,11 @@ class VesselTracerApp(QMainWindow):
         group4 = QGroupBox("View & Reset")
         group4_layout = QHBoxLayout(group4)
         self.btn_show_path = QPushButton("Preview Mask")
+        self.btn_show_3d_view = QPushButton("Show 3D View")
         self.btn_step_view = QPushButton("View Steps")
         self.btn_reset = QPushButton("Reset All")
         group4_layout.addWidget(self.btn_show_path)
+        group4_layout.addWidget(self.btn_show_3d_view)
         group4_layout.addWidget(self.btn_step_view)
         group4_layout.addWidget(self.btn_reset)
         main_controls_layout.addWidget(group4)
@@ -1027,10 +1051,52 @@ class VesselTracerApp(QMainWindow):
         self.btn_add_noise_roi.clicked.connect(self.add_noise_roi_mode)
         self.btn_smoothing_preview.clicked.connect(self.open_smoothing_preview)
         self.btn_show_path.clicked.connect(self.show_segmented_path_preview)
+        self.btn_show_3d_view.clicked.connect(self.show_3d_view)
         self.btn_step_view.clicked.connect(self.show_step_viewer)
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
+
+    def show_3d_view(self):
+        """
+        Generates and displays the interactive 3D plot in a dialog.
+        """
+        if self.app_state != AppState.DONE:
+            QMessageBox.warning(self, "Not Ready", "Please run a full analysis first to generate 3D data.")
+            return
+
+        self.statusBar().showMessage("Generating 3D plot...", 3000)
+        QApplication.processEvents()
+
+        plot_traces = self.generate_3d_plot_data()
+
+        if not plot_traces:
+            QMessageBox.warning(self, "Error", "Could not generate any data for the 3D plot.")
+            return
+
+        fig = go.Figure(data=plot_traces)
+        fig.update_layout(
+            title_text='3D Vessel Reconstruction',
+            scene=dict(
+                xaxis_title='X (pixels)',
+                yaxis_title='Y (pixels)',
+                zaxis_title='Frame Index (Time)',
+                aspectratio=dict(x=1, y=1, z=0.5), # Make Z axis a bit shorter
+                camera_eye=dict(x=1.2, y=1.2, z=0.6)
+            ),
+            margin=dict(l=0, r=0, b=0, t=40) # Reduce margins
+        )
+
+        # Invert Y-axis because image coordinates (0,0) are top-left
+        fig.update_scenes(yaxis_autorange="reversed")
+
+        # Generate HTML string
+        html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+        dialog = PlotlyViewerDialog(html_content, self)
+        dialog.exec_()
+
+        self.statusBar().showMessage("Ready")
 
     def update_ui_for_state(self):
         """Updates the UI element states (text, enabled/disabled) based on the current AppState."""
@@ -1656,33 +1722,38 @@ class VesselTracerApp(QMainWindow):
 
         exploration_img = path_base_image.copy()
 
-        full_path = []
-        path_found_for_all_segments = True
-        for i in range(len(mask_pixels) - 1):
-            start_node = mask_pixels[i]
-            end_node = mask_pixels[i + 1]
+        self.final_paths = []
+        self.alternative_paths = []
 
-            current_costmap = pathfinding_costmap.copy()
-            if i > 0:
-                prev_node = mask_pixels[i - 1]
-                cv2.circle(current_costmap, (prev_node[1], prev_node[0]), self.FORBIDDEN_ZONE_RADIUS,
-                           self.PATHFINDING_OBSTACLE_COST, -1)
+        # We now find end-to-end paths, not segments.
+        # So we only need the first and last marked points.
+        start_node = mask_pixels[0]
+        end_node = mask_pixels[-1]
 
-            # Don't visualize in real-time during the loop to speed things up
-            segment = self.find_path_astar(current_costmap, start_node, end_node, self.vessel_identity_map, viz_callback=None)
+        # --- Find up to 3 distinct end-to-end paths ---
+        paths_found = []
+        current_cost_map = pathfinding_costmap.copy()
+        path_blocking_cost = 1e7
 
-            if segment is None:
-                # Try again without the forbidden zone
-                segment = self.find_path_astar(pathfinding_costmap, start_node, end_node, self.vessel_identity_map,
-                                               viz_callback=None)
+        for _ in range(3): # Find a max of 3 paths
+            path = self.find_path_astar(current_cost_map, start_node, end_node, self.vessel_identity_map, viz_callback=None)
 
-            if segment is None:
-                path_found_for_all_segments = False
+            if path:
+                paths_found.append(path)
+                # Block this path for the next search
+                for y, x in path:
+                    if 0 <= y < current_cost_map.shape[0] and 0 <= x < current_cost_map.shape[1]:
+                        current_cost_map[y, x] += path_blocking_cost
+            else:
+                # No more paths can be found
                 break
 
-            full_path.extend(segment if i == 0 else segment[1:])
-
-        self.final_paths = [full_path] if path_found_for_all_segments and full_path else []
+        if paths_found:
+            self.final_paths = [paths_found[0]] # The first path is the main one
+            self.alternative_paths = paths_found[1:] # The rest are alternatives
+        else:
+            self.final_paths = []
+            self.alternative_paths = []
 
         if not self.final_paths:
             QMessageBox.warning(self, "Pathfinding Failed",
@@ -1702,9 +1773,11 @@ class VesselTracerApp(QMainWindow):
             return
 
         # 4. Display Path Search Result
-        path_points_yx = np.array(full_path, dtype=np.int32).reshape(-1, 1, 2)
-        path_points_xy = path_points_yx[:, :, ::-1]
-        cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
+        for path in self.final_paths:
+            path_points_yx = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
+            path_points_xy = path_points_yx[:, :, ::-1]
+            cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
+
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
                      "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
@@ -1729,19 +1802,57 @@ class VesselTracerApp(QMainWindow):
         """
         if base_original_pip is None:
             self.final_path_image = np.zeros((512, 512, 3), dtype=np.uint8)
+            return
+
+        final_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
+
+        if not self.final_paths or not self.final_paths[0] or not self.vessel_masks or self.temporal_cost_map is None:
+            self.final_path_image = final_image
         else:
-            # Use the original MIP directly without histogram equalization for a more authentic look
-            self.final_path_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
+            # --- Create a frequency map to highlight the main path ---
+            h, w = base_original_pip.shape
+            frequency_map = np.zeros((h, w), dtype=np.float32)
+            labeled_masks = [cv2.connectedComponents(mask)[1] for mask in self.vessel_masks]
+            main_path = self.final_paths[0]
 
-        if not self.final_paths or not self.final_paths[0]: return
+            for y, x in main_path:
+                if 0 <= y < h and 0 <= x < w:
+                    frame_idx = int(self.temporal_cost_map[y, x])
+                    if 0 <= frame_idx < len(labeled_masks):
+                        labeled_mask = labeled_masks[frame_idx]
+                        label = labeled_mask[y, x]
+                        if label > 0:
+                            frequency_map[labeled_mask == label] += 1
 
-        path = self.final_paths[0]
-        path_points_yx = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
-        path_points_xy = path_points_yx[:, :, ::-1]
+            if np.max(frequency_map) > 0:
+                norm_freq_map = cv2.normalize(frequency_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                path_mask = (norm_freq_map > 0).astype(np.uint8)
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                dilated_path_mask = cv2.dilate(path_mask, kernel, iterations=1)
+                heatmap = cv2.applyColorMap(norm_freq_map, cv2.COLORMAP_HOT)
+                heatmap_on_path = cv2.bitwise_and(heatmap, heatmap, mask=dilated_path_mask)
+                background = cv2.bitwise_and(final_image, final_image, mask=~dilated_path_mask)
+                final_image = cv2.add(background, heatmap_on_path)
 
-        # Draw the path (with a black border for visibility)
-        cv2.polylines(self.final_path_image, [path_points_xy], isClosed=False, color=(0, 0, 0), thickness=4)
-        cv2.polylines(self.final_path_image, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
+                # Also draw a solid line for the main path's centerline for clarity
+                main_path_yx = np.array(main_path, dtype=np.int32).reshape(-1, 1, 2)
+                main_path_xy = main_path_yx[:, :, ::-1]
+                cv2.polylines(final_image, [main_path_xy], isClosed=False, color=(255, 255, 255), thickness=1)
+
+
+            # --- Draw alternative paths ---
+            if self.alternative_paths:
+                overlay = final_image.copy()
+                for alt_path in self.alternative_paths:
+                    if not alt_path: continue
+                    path_points_yx = np.array(alt_path, dtype=np.int32).reshape(-1, 1, 2)
+                    path_points_xy = path_points_yx[:, :, ::-1]
+                    cv2.polylines(overlay, [path_points_xy], isClosed=False, color=(255, 255, 0), thickness=3) # Cyan
+
+                alpha = 0.6 # Transparency
+                final_image = cv2.addWeighted(overlay, alpha, final_image, 1 - alpha, 0)
+
+            self.final_path_image = final_image
 
         # Redraw marked points on top
         for i, p_info in enumerate(self.path_points_info):
@@ -1754,6 +1865,88 @@ class VesselTracerApp(QMainWindow):
                 color = (255, 100, 0)  # Blue
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius + 2, (0, 0, 0), -1)
             cv2.circle(self.final_path_image, (pt.x(), pt.y()), radius, color, -1)
+
+    def generate_3d_plot_data(self):
+        """
+        Generates data for a 3D plot of the vessel structure and paths.
+
+        Returns:
+            A list of plotly graph objects (e.g., go.Scatter3d) to be plotted.
+        """
+        if not self.vessel_masks:
+            return []
+
+        # --- 1. Prepare data for the main vessel structure ---
+        vessel_x, vessel_y, vessel_z = [], [], []
+        # Downsample for performance. Process every Nth frame.
+        frame_downsample_factor = 1
+        # Downsample points within a frame. Take every Nth point.
+        point_downsample_factor = 4
+
+        for i, mask in enumerate(self.vessel_masks):
+            if i % frame_downsample_factor == 0:
+                points = np.argwhere(mask > 0)
+                if points.size > 0:
+                    points = points[::point_downsample_factor] # Downsample points
+                    vessel_z.extend([i] * len(points))
+                    vessel_y.extend(points[:, 0])
+                    vessel_x.extend(points[:, 1])
+
+        vessel_trace = go.Scatter3d(
+            x=vessel_x, y=vessel_y, z=vessel_z,
+            mode='markers',
+            marker=dict(
+                size=1,
+                color='gray',
+                opacity=0.3
+            ),
+            name='Vessel Structure'
+        )
+
+        traces = [vessel_trace]
+
+        # --- 2. Prepare data for the main path ---
+        if self.final_paths and self.final_paths[0]:
+            main_path = self.final_paths[0]
+            path_x, path_y, path_z = [], [], []
+            for y_coord, x_coord in main_path:
+                path_x.append(x_coord)
+                path_y.append(y_coord)
+                if self.temporal_cost_map is not None and 0 <= y_coord < self.temporal_cost_map.shape[0] and 0 <= x_coord < self.temporal_cost_map.shape[1]:
+                    path_z.append(self.temporal_cost_map[y_coord, x_coord])
+                else:
+                    path_z.append(0) # Fallback
+
+            main_trace = go.Scatter3d(
+                x=path_x, y=path_y, z=path_z,
+                mode='lines',
+                line=dict(color='lime', width=8),
+                name='Main Path'
+            )
+            traces.append(main_trace)
+
+        # --- 3. Prepare data for alternative paths ---
+        if self.alternative_paths:
+            for i, alt_path in enumerate(self.alternative_paths):
+                if not alt_path: continue
+                path_x, path_y, path_z = [], [], []
+                for y_coord, x_coord in alt_path:
+                    path_x.append(x_coord)
+                    path_y.append(y_coord)
+                    if self.temporal_cost_map is not None and 0 <= y_coord < self.temporal_cost_map.shape[0] and 0 <= x_coord < self.temporal_cost_map.shape[1]:
+                        path_z.append(self.temporal_cost_map[y_coord, x_coord])
+                    else:
+                        path_z.append(0) # Fallback
+
+                alt_trace = go.Scatter3d(
+                    x=path_x, y=path_y, z=path_z,
+                    mode='lines',
+                    line=dict(color='cyan', width=4, dash='dot'),
+                    name=f'Alternative {i+1}'
+                )
+                traces.append(alt_trace)
+
+        return traces
 
     def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None):
         """Finds the optimal path between two points using the A* algorithm.
@@ -1890,6 +2083,7 @@ class VesselTracerApp(QMainWindow):
         self.noise_rois = []
         self.drawing_mode = None
         self.final_paths = None
+        self.alternative_paths = None
         self.final_path_image = None
         self.base_mask_projection = None
         self.temporal_cost_map = None
