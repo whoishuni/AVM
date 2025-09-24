@@ -45,9 +45,28 @@ class YC_ImageLabel(QLabel):
     def zoom_out(self):
         self.zoom(0.8)
 
-    def zoom(self, factor: float):
+    def zoom(self, factor: float, anchor: Optional[QPoint] = None):
+        if not self.current_pixmap:
+            return
+
+        if anchor is None:
+            anchor = self.rect().center()
+
+        old_factor = self.zoom_factor
         self.zoom_factor *= factor
         self.zoom_factor = max(0.1, min(self.zoom_factor, 20.0))
+        new_factor = self.zoom_factor
+
+        if old_factor != new_factor:
+            # Get the mouse position relative to the widget
+            mouse_point = anchor
+            # Calculate the new pan offset to keep the point under the mouse stationary
+            self.pan_offset = mouse_point - (mouse_point - self.pan_offset) * (new_factor / old_factor)
+
+        self.update()
+
+    def pan_image(self, dx: int, dy: int):
+        self.pan_offset += QPoint(dx, dy)
         self.update()
 
     def get_image_coords(self, event_pos: QPoint) -> Optional[QPoint]:
@@ -85,7 +104,7 @@ class YC_ImageLabel(QLabel):
                 self.update()
 
     def mouseMoveEvent(self, event):
-        if self.is_panning and self.current_pixmap:
+        if self.is_panning:
             delta = event.pos() - self.last_pan_pos
             self.pan_offset += delta
             self.last_pan_pos = event.pos()
@@ -95,8 +114,6 @@ class YC_ImageLabel(QLabel):
             if end_pos and self.current_drawing_roi:
                 self.current_drawing_roi.setBottomRight(end_pos)
                 self.update()
-        else:
-            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton and self.is_panning:
@@ -111,10 +128,11 @@ class YC_ImageLabel(QLabel):
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            anchor_point = event.position().toPoint()
             if event.angleDelta().y() > 0:
-                self.zoom_in()
+                self.zoom(1.25, anchor=anchor_point)
             else:
-                self.zoom_out()
+                self.zoom(0.8, anchor=anchor_point)
             event.accept()
         else:
             super().wheelEvent(event)

@@ -10,8 +10,9 @@ class YC_HelpDialog(QDialog):
     def __init__(self, params_meta: dict, parent=None):
         super().__init__(parent)
         self.params_meta = params_meta
-        self.setWindowTitle("YC Help")
+        self.setWindowTitle(parent.tr("help_title"))
         self.setMinimumSize(600, 700)
+        self.set_stylesheet()
 
         self.layout = QVBoxLayout(self)
 
@@ -31,22 +32,23 @@ class YC_HelpDialog(QDialog):
         controls_layout.setHorizontalSpacing(20)
         controls_layout.setVerticalSpacing(10)
 
-        controls_label = QLabel("<h2>Controls & Shortcuts</h2>")
+        tr = self.parent().tr
+        controls_label = QLabel(f"<h2>{tr('help_controls_title')}</h2>")
         main_layout.addWidget(controls_label)
 
         shortcuts = [
-            ("Open Folder", QKeySequence(QKeySequence.StandardKey.Open).toString()),
-            ("Reset Application", "Ctrl+R"),
-            ("Exit Application", QKeySequence(QKeySequence.StandardKey.Quit).toString()),
-            ("Open Parameters", "Ctrl+P"),
-            ("Zoom In", QKeySequence(QKeySequence.StandardKey.ZoomIn).toString()),
-            ("Zoom Out", QKeySequence(QKeySequence.StandardKey.ZoomOut).toString()),
-            ("Reset Zoom", "Ctrl+0"),
-            ("Show Help (This Window)", "F1"),
-            ("Next Frame", "D"),
-            ("Previous Frame", "A"),
-            ("Zoom In/Out (Alternative)", "Ctrl + Mouse Wheel"),
-            ("Pan Image", "Middle Mouse Button + Drag"),
+            (tr("help_control_open"), QKeySequence(QKeySequence.StandardKey.Open).toString()),
+            (tr("help_control_reset"), "Ctrl+R"),
+            (tr("help_control_exit"), QKeySequence(QKeySequence.StandardKey.Quit).toString()),
+            (tr("help_control_params"), "Ctrl+P"),
+            (tr("help_control_zoom_in"), QKeySequence(QKeySequence.StandardKey.ZoomIn).toString()),
+            (tr("help_control_zoom_out"), QKeySequence(QKeySequence.StandardKey.ZoomOut).toString()),
+            (tr("help_control_reset_zoom"), "Ctrl+0"),
+            (tr("help_control_help"), "F1"),
+            (tr("help_control_next_frame"), "D"),
+            (tr("help_control_prev_frame"), "A"),
+            (tr("help_control_alt_zoom"), "Ctrl + Mouse Wheel"),
+            (tr("help_control_pan"), "Middle Mouse Button + Drag"),
         ]
 
         key_style = "background-color: #555; color: #EEE; padding: 2px 6px; border-radius: 4px; font-weight: bold;"
@@ -71,7 +73,7 @@ class YC_HelpDialog(QDialog):
         params_layout.setContentsMargins(10, 10, 10, 10)
         params_layout.setVerticalSpacing(10)
 
-        params_label = QLabel("<h2>Algorithm Parameters</h2>")
+        params_label = QLabel(f"<h2>{tr('help_params_title')}</h2>")
         main_layout.addWidget(params_label)
 
         param_name_style = "font-weight: bold; color: #00A0A0;"
@@ -90,3 +92,45 @@ class YC_HelpDialog(QDialog):
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.button_box.rejected.connect(self.reject)
         self.layout.addWidget(self.button_box)
+
+    def set_stylesheet(self):
+        style = """
+            QDialog {
+                background-color: #383838;
+                color: #D0D0D0;
+            }
+            QScrollArea {
+                border: none;
+            }
+            QLabel {
+                color: #D0D0D0;
+                font-size: 13px;
+            }
+            h2 {
+                color: #00A0A0;
+                font-size: 16px;
+                font-weight: bold;
+                border-bottom: 1px solid #555;
+                padding-bottom: 5px;
+                margin-top: 10px;
+            }
+            QFrame {
+                border: 1px solid #555;
+            }
+            QPushButton {
+                background-color: #555555;
+                color: #EEEEEE;
+                border: 1px solid #666666;
+                padding: 5px 15px;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #686868;
+                border: 1px solid #777777;
+            }
+            QPushButton:pressed {
+                background-color: #4A4A4A;
+            }
+        """
+        self.setStyleSheet(style)
