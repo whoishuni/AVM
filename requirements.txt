@@ -1,0 +1,7 @@
+PyQt6
+PyQt6-WebEngine
+opencv-python-headless
+numpy
+scikit-image
+scikit-learn
+plotly
