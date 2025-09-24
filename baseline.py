@@ -4,6 +4,7 @@ import re
 import numpy as np
 import heapq
 import math
+import argparse
 from collections import deque
 from enum import Enum, auto
 from typing import Optional, List, Tuple, Dict, Any
@@ -14,7 +15,7 @@ try:
                                  QFileDialog, QLabel, QStatusBar, QMainWindow, QMessageBox,
                                  QSizePolicy, QProgressDialog, QSlider, QDialog, QDialogButtonBox,
                                  QGroupBox, QStyle)
-    from PyQt5.QtGui import (QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont)
+    from PyQt.QtGui import (QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont)
     from PyQt5.QtCore import (Qt, QPoint, pyqtSignal, QThread, QRect, QSize)
     import cv2
     from skimage.morphology import skeletonize
@@ -31,6 +32,9 @@ except ImportError as e:
     msg_box.setWindowTitle("Dependency Error")
     msg_box.exec_()
     sys.exit(1)
+
+# Local imports
+from pathfinder import InteractivePathfinder, find_path_astar
 
 
 # --- Global Helper Functions ---
@@ -428,12 +432,13 @@ def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
 
 class AppState(Enum):
     """Defines the possible states of the application's finite state machine."""
-    IDLE = auto()             # Application is waiting for images to be loaded.
-    LOADED = auto()           # Images are loaded, ready for user interaction.
-    MARKING_PATH = auto()     # User is actively marking points on the image.
-    RANGE_CONFIRMED = auto()  # User has confirmed points, ready for configuration or analysis.
-    PROCESSING = auto()       # Application is busy with a background task (e.g., mask generation).
-    DONE = auto()             # Analysis is complete and results are shown.
+    IDLE = auto()
+    LOADED = auto()
+    MARKING_PATH = auto()
+    RANGE_CONFIRMED = auto()
+    PROCESSING = auto()
+    AWAITING_BRANCH_SELECTION = auto()  # New state for interactive pathfinding
+    DONE = auto()
 
 
 class DrawingMode(Enum):
@@ -455,9 +460,11 @@ class ImageLabel(QLabel):
                                     providing the QPoint in image coordinates.
         roi_drawn (pyqtSignal): Emitted when the user finishes drawing a
                                 rectangular ROI, providing the QRect.
+        branch_clicked (pyqtSignal): Emitted when the user clicks on a branch option.
     """
     point_clicked = pyqtSignal(QPoint)
     roi_drawn = pyqtSignal(QRect)
+    branch_clicked = pyqtSignal(int)
 
     def __init__(self, parent: 'VesselTracerApp'):
         """Initializes the ImageLabel.
@@ -534,17 +541,54 @@ class ImageLabel(QLabel):
         Args:
             event: The QMouseEvent.
         """
-        if event.button() == Qt.LeftButton:
-            if self.main_window.app_state == AppState.MARKING_PATH:
-                image_coords = self.get_image_coords(event.pos())
-                if image_coords:
-                    self.point_clicked.emit(image_coords)
-            elif self.main_window.drawing_mode is not None:
-                start_pos = self.get_image_coords(event.pos())
-                if start_pos:
-                    self.is_drawing_roi = True
-                    self.current_drawing_roi = QRect(start_pos, start_pos)
-                    self.update()
+        if event.button() != Qt.LeftButton:
+            return
+
+        image_coords = self.get_image_coords(event.pos())
+        if not image_coords:
+            return
+
+        if self.main_window.app_state == AppState.MARKING_PATH:
+            self.point_clicked.emit(image_coords)
+
+        elif self.main_window.app_state == AppState.AWAITING_BRANCH_SELECTION:
+            self.find_and_emit_closest_branch(image_coords)
+
+        elif self.main_window.drawing_mode is not None:
+            self.is_drawing_roi = True
+            self.current_drawing_roi = QRect(image_coords, image_coords)
+            self.update()
+
+    def find_and_emit_closest_branch(self, click_pos: QPoint):
+        """Finds the closest branch to a click and emits a signal if found.
+
+        Args:
+            click_pos: The QPoint of the user's click in image coordinates.
+        """
+        pathfinder = self.main_window.pathfinder
+        if not pathfinder or not pathfinder.branch_options:
+            return
+
+        click_arr = np.array([click_pos.y(), click_pos.x()])
+        min_dist = float('inf')
+        closest_branch_idx = -1
+
+        for i, branch in enumerate(pathfinder.branch_options):
+            if not branch:
+                continue
+
+            branch_arr = np.array(branch)
+            distances = np.linalg.norm(branch_arr - click_arr, axis=1)
+            current_min_dist = np.min(distances)
+
+            if current_min_dist < min_dist:
+                min_dist = current_min_dist
+                closest_branch_idx = i
+
+        # Define a threshold for how close the click must be to a branch
+        CLICK_THRESHOLD = 10  # pixels
+        if min_dist < CLICK_THRESHOLD and closest_branch_idx != -1:
+            self.branch_clicked.emit(closest_branch_idx)
 
     def mouseMoveEvent(self, event):
         """Handles mouse movement during ROI drawing to update the rectangle.
@@ -850,10 +894,6 @@ class VesselTracerApp(QMainWindow):
         MAX_NODE_SEARCH_RADIUS (int): Max distance to search for a vessel pixel near a click.
         MAX_GAP_BRIDGE_DISTANCE (int): Max distance for bridging gaps in vessel masks.
         FORBIDDEN_ZONE_RADIUS (int): Radius to prevent A* from immediately backtracking.
-        TIME_COST_WEIGHT (float): Weight for the temporal cost in A* pathfinding.
-        PATHFINDING_OBSTACLE_COST (float): High cost for pixels not on the vessel mask.
-        TURN_PENALTY_WEIGHT (float): Weight for the turn penalty in A* pathfinding.
-        CROSS_VESSEL_PENALTY (float): High penalty for jumping between different vessels.
     """
     # --- Tunable Parameters ---
     BG_REMOVAL_THRESHOLD_OFFSET = 15
@@ -861,14 +901,12 @@ class VesselTracerApp(QMainWindow):
     MAX_NODE_SEARCH_RADIUS = 50
     MAX_GAP_BRIDGE_DISTANCE = 30
     FORBIDDEN_ZONE_RADIUS = 30
-    TIME_COST_WEIGHT = 1.0
-    PATHFINDING_OBSTACLE_COST = 1e9
-    TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
-    CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
+    # Pathfinding cost parameters are now managed in pathfinder.py
 
-    def __init__(self):
+    def __init__(self, args):
         """Initializes the main application window, state variables, and UI."""
         super().__init__()
+        self.args = args
         self.setWindowTitle("YC血管追蹤2D")
         self.setGeometry(100, 100, 1280, 960)
         self.set_stylesheet()
@@ -891,10 +929,23 @@ class VesselTracerApp(QMainWindow):
         self.path_points_info: List[Dict[str, Any]] = []
         self.app_state: AppState = AppState.IDLE
         self.smoothing_level: int = 4
+        self.pathfinder: Optional[InteractivePathfinder] = None
+
+        # Colors for drawing branches, will cycle through them
+        self.branch_colors = [
+            (255, 255, 0),   # Yellow
+            (0, 255, 255),   # Cyan
+            (255, 0, 255),   # Magenta
+            (255, 165, 0),   # Orange
+            (0, 255, 0)      # Green
+        ]
 
         self.init_ui()
         self.connect_signals()
         self.update_ui_for_state()
+
+        if self.args.input_dir:
+            self.load_folder(self.args.input_dir)
 
     def set_stylesheet(self):
         """Sets the QSS dark theme style for the application."""
@@ -1056,6 +1107,31 @@ class VesselTracerApp(QMainWindow):
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
+        self.image_label.branch_clicked.connect(self.handle_branch_selection)
+
+    def handle_branch_selection(self, branch_index: int):
+        """Slot to handle the user's selection of a branch."""
+        if self.pathfinder and self.app_state == AppState.AWAITING_BRANCH_SELECTION:
+            self.pathfinder.select_branch(branch_index)
+
+            # If there are no more branches, the path is complete
+            if not self.pathfinder.branch_options:
+                self.app_state = AppState.DONE
+                self.info_label.setText("Interactive pathfinding complete!")
+                # Generate final image with full path
+                frame_range = self._get_frame_range(for_processing=False)
+                if frame_range:
+                    start_f, end_f = frame_range
+                    pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+                    if pip is not None:
+                        self.final_path_image = self.get_overlayed_display_image(pip, -1)
+                        self.display_image(self.final_path_image)
+
+            else:
+                # Still more branches to choose, just update the view
+                self.update_range_view()
+
+            self.update_ui_for_state()
 
     def show_3d_view(self):
         """
@@ -1122,10 +1198,16 @@ class VesselTracerApp(QMainWindow):
                 "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False
             },
             AppState.RANGE_CONFIRMED: {
-                "main_action_text": "Run Full Analysis", "main_action_enabled": True,
-                "info_text": f"Points confirmed. Smoothing: {self.smoothing_level}. Draw noise areas or start analysis.",
-                "status_text": "Ready for analysis...",
+                "main_action_text": "Start Interactive Pathfinding", "main_action_enabled": True,
+                "info_text": f"Points confirmed. Smoothing: {self.smoothing_level}. Press Start to begin.",
+                "status_text": "Ready for interactive pathfinding...",
                 "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False
+            },
+            AppState.AWAITING_BRANCH_SELECTION: {
+                "main_action_text": "Select a Branch", "main_action_enabled": False,
+                "info_text": "Click on a colored branch to choose the path to follow.",
+                "status_text": "Waiting for user input...",
+                "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False
             },
             AppState.PROCESSING: {
                 "main_action_text": "Processing...", "main_action_enabled": False,
@@ -1186,20 +1268,24 @@ class VesselTracerApp(QMainWindow):
         """Opens a dialog to select an image folder and loads the images."""
         path = QFileDialog.getExistingDirectory(self, "Select Image Folder")
         if path:
-            self.reset_system()
-            self.images = load_images_from_folder(path)
-            if not self.images:
-                QMessageBox.warning(self, "Error", "Could not load any images from the selected folder.")
-                self.reset_system()
-                return
+            self.load_folder(path)
 
-            self.global_background_color = get_most_frequent_color(self.images[0])
-            self.current_frame_index = 0
-            self.frame_slider.setRange(0, len(self.images) - 1)
-            self.frame_slider.setValue(0)
-            self.update_frame_display(0)
-            self.app_state = AppState.LOADED
-            self.update_ui_for_state()
+    def load_folder(self, folder_path: str):
+        """Loads images from a specified folder path."""
+        self.reset_system()
+        self.images = load_images_from_folder(folder_path)
+        if not self.images:
+            QMessageBox.warning(self, "Error", f"Could not load any images from '{folder_path}'.")
+            self.reset_system()
+            return
+
+        self.global_background_color = get_most_frequent_color(self.images[0])
+        self.current_frame_index = 0
+        self.frame_slider.setRange(0, len(self.images) - 1)
+        self.frame_slider.setValue(0)
+        self.update_frame_display(0)
+        self.app_state = AppState.LOADED
+        self.update_ui_for_state()
 
     def slider_value_changed(self, value: int):
         """Slot for the frame slider's valueChanged signal.
@@ -1274,7 +1360,23 @@ class VesselTracerApp(QMainWindow):
             frame_index = self.current_frame_index
 
         display_img_bgr = cv2.cvtColor(base_image_gray, cv2.COLOR_GRAY2BGR)
-        display_img_bgr = self.draw_path_points_on_image(display_img_bgr, frame_index, detailed_color=True)
+
+        # Draw the main path and branch options if the pathfinder is active
+        if self.pathfinder:
+            # Draw the main, confirmed path
+            if self.pathfinder.full_path:
+                path_points = np.array(self.pathfinder.full_path, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.polylines(display_img_bgr, [path_points[:, :, ::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
+
+            # Draw the branch options in different colors
+            for i, branch in enumerate(self.pathfinder.branch_options):
+                if branch:
+                    color = self.branch_colors[i % len(self.branch_colors)]
+                    branch_points = np.array(branch, dtype=np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(display_img_bgr, [branch_points[:, :, ::-1]], isClosed=False, color=color, thickness=2)
+        else:
+            # Fallback to drawing original marked points if pathfinder isn't running
+            display_img_bgr = self.draw_path_points_on_image(display_img_bgr, frame_index, detailed_color=True)
 
         for r in self.noise_rois:
             cv2.rectangle(display_img_bgr, (r.x(), r.y()), (r.x() + r.width(), r.y() + r.height()), (0, 0, 255), 2)
@@ -1549,11 +1651,12 @@ class VesselTracerApp(QMainWindow):
         return bgr_image
 
     def start_analysis(self):
-        """Starts the full analysis pipeline after user confirmation."""
+        """Starts the interactive pathfinding process."""
         self.app_state = AppState.PROCESSING
         self.update_ui_for_state()
 
-        if self.base_mask_projection is None or self.temporal_cost_map is None:
+        # Step 1: Ensure all necessary masks and maps are generated
+        if self.base_mask_projection is None:
             if not self.prepare_and_generate_masks():
                 QMessageBox.warning(self, "Analysis Aborted", "Failed to generate vessel mask. Cannot continue analysis.")
                 self.app_state = AppState.RANGE_CONFIRMED
@@ -1561,40 +1664,34 @@ class VesselTracerApp(QMainWindow):
                 return
 
         final_mask = self.base_mask_projection
-        cost_map = self.temporal_cost_map
-
         if np.sum(final_mask) == 0:
-            QMessageBox.warning(self, "Analysis Aborted", "The generated vessel mask is empty. No path can be found.")
+            QMessageBox.warning(self, "Analysis Aborted", "The generated vessel mask is empty.")
             self.app_state = AppState.RANGE_CONFIRMED
             self.update_ui_for_state()
             return
 
-        mask_pixels = []
-        all_pixels_found = True
-        for p_info in self.path_points_info:
-            pixel = self.find_closest_pixel_on_mask(p_info["point"], final_mask)
-            if pixel:
-                mask_pixels.append(pixel)
-            else:
-                all_pixels_found = False
-                break
+        # Step 2: Find the starting point on the mask
+        start_p_info = self.path_points_info[0]
+        start_pixel = self.find_closest_pixel_on_mask(start_p_info["point"], final_mask)
 
-        if not all_pixels_found or not mask_pixels or len(mask_pixels) < 2:
-            QMessageBox.warning(self, "Pathfinding Failed",
-                                "Could not locate all marked points on the vessel mask.\n\n"
-                                "Please try:\n"
-                                "- Adjusting the smoothing level\n"
-                                "- Re-marking points to be closer to vessel centers\n"
-                                "- Drawing noise areas to exclude interference")
+        if not start_pixel:
+            QMessageBox.warning(self, "Pathfinding Failed", "Could not locate the starting point on the vessel mask.")
             self.app_state = AppState.RANGE_CONFIRMED
             self.update_ui_for_state()
             return
 
-        pathfinding_costmap = np.full(cost_map.shape, self.PATHFINDING_OBSTACLE_COST, dtype=np.float32)
-        pathfinding_costmap[final_mask > 0] = 0  # Base cost is 0
-        pathfinding_costmap += cost_map  # Add time cost
+        # Step 3: Initialize the InteractivePathfinder
+        self.pathfinder = InteractivePathfinder(
+            mask=final_mask,
+            cost_map=self.temporal_cost_map,
+            identity_map=self.vessel_identity_map
+        )
+        self.pathfinder.start_pathfinding(start_pixel)
 
-        self.show_full_analysis_steps(final_mask, mask_pixels, pathfinding_costmap)
+        # Step 4: Update UI to show the first set of branches
+        self.app_state = AppState.AWAITING_BRANCH_SELECTION
+        self.update_range_view() # Update the display with the new path/branches
+        self.update_ui_for_state()
 
     def replay_path_animation(self, anim_data: dict):
         """Replays the A* pathfinding search animation from the step viewer.
@@ -1625,13 +1722,13 @@ class VesselTracerApp(QMainWindow):
             if i > 0:  # Add a forbidden zone to prevent the path from going backward
                 prev_node = pixels[i - 1]
                 cv2.circle(current_costmap, (prev_node[1], prev_node[0]), self.FORBIDDEN_ZONE_RADIUS,
-                           self.PATHFINDING_OBSTACLE_COST, -1)
+                           1e9, -1)
 
-            segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map,
+            segment = find_path_astar(current_costmap, start_node, end_node, identity_map,
                                            viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
-                segment = self.find_path_astar(cost_map, start_node, end_node, identity_map,
+                segment = find_path_astar(cost_map, start_node, end_node, identity_map,
                                                viz_callback=update_visualization)
 
             if segment:
@@ -1695,7 +1792,7 @@ class VesselTracerApp(QMainWindow):
 
         # 2. Cost Map Heatmap
         display_costmap = pathfinding_costmap.copy()
-        valid_pixels = display_costmap < self.PATHFINDING_OBSTACLE_COST
+        valid_pixels = display_costmap < 1e9 # Use constant
         if np.any(valid_pixels):
             min_val = np.min(display_costmap[valid_pixels])
             max_val = np.max(display_costmap[valid_pixels])
@@ -1736,7 +1833,7 @@ class VesselTracerApp(QMainWindow):
         path_blocking_cost = 1e7
 
         for _ in range(3): # Find a max of 3 paths
-            path = self.find_path_astar(current_cost_map, start_node, end_node, self.vessel_identity_map, viz_callback=None)
+            path = find_path_astar(current_cost_map, start_node, end_node, self.vessel_identity_map, viz_callback=None)
 
             if path:
                 paths_found.append(path)
@@ -1948,104 +2045,6 @@ class VesselTracerApp(QMainWindow):
 
         return traces
 
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None):
-        """Finds the optimal path between two points using the A* algorithm.
-
-        This implementation includes costs for distance, time (frame index),
-        path curvature (turn penalty), and for crossing between different
-        vessel structures (cross vessel penalty).
-
-        Args:
-            cost_map: The base cost map (incorporating temporal cost).
-            start: The starting (y, x) coordinate tuple.
-            end: The ending (y, x) coordinate tuple.
-            vessel_identity_map: The map assigning a unique ID to each vessel.
-            viz_callback: An optional function to call for visualizing the search.
-
-        Returns:
-            A list of (y, x) tuples representing the path, or None if no path is found.
-        """
-        if cost_map[start] >= self.PATHFINDING_OBSTACLE_COST or cost_map[end] >= self.PATHFINDING_OBSTACLE_COST:
-            return None
-
-        def heuristic(p1, p2):
-            return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
-
-        open_set = [(heuristic(start, end), 0, start)]  # f_cost, g_cost, pos
-        came_from = {}
-        g_costs = {start: 0}
-        closed_set = set()
-
-        node_counter = 0
-        viz_interval = 50
-
-        while open_set:
-            _, g_cost, current = heapq.heappop(open_set)
-
-            if current == end:
-                if viz_callback:
-                    viz_callback(list(closed_set))
-
-                path = []
-                while current in came_from:
-                    path.append(current)
-                    current = came_from[current]
-                path.append(start)
-                path.reverse()
-                return path
-
-            closed_set.add(current)
-
-            node_counter += 1
-            if viz_callback and node_counter % viz_interval == 0:
-                viz_callback(list(closed_set))
-
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    if dr == 0 and dc == 0: continue
-                    neighbor = (current[0] + dr, current[1] + dc)
-
-                    if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]) or \
-                            cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
-                            neighbor in closed_set:
-                        continue
-
-                    # --- Vessel identity penalty ---
-                    cross_vessel_penalty = 0
-                    if vessel_identity_map is not None:
-                        current_id = vessel_identity_map[current]
-                        neighbor_id = vessel_identity_map[neighbor]
-                        if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
-                            cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
-
-                    # --- Morphology-aware path penalty ---
-                    turn_penalty = 0
-                    parent = came_from.get(current)
-                    if parent:
-                        v1 = (current[0] - parent[0], current[1] - parent[1])
-                        v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
-
-                        dot_product = v1[0] * v2[0] + v1[1] * v2[1]
-                        mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
-                        mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
-
-                        if mag1 > 0 and mag2 > 0:
-                            # 1 - cos(theta) gives a value from 0 (straight) to 2 (180-degree turn)
-                            cosine_similarity = dot_product / (mag1 * mag2)
-                            turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
-
-                    move_cost = np.sqrt(dr ** 2 + dc ** 2)
-                    time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
-                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
-
-                    if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
-                        g_costs[neighbor] = new_g_cost
-                        f_cost = new_g_cost + heuristic(neighbor, end)
-                        heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
-                        came_from[neighbor] = current
-
-        return None
-
     def find_closest_pixel_on_mask(self, point: QPoint, mask_img: np.ndarray) -> Optional[Tuple[int, int]]:
         """Finds the closest white pixel on a binary mask to a given point.
 
@@ -2151,9 +2150,16 @@ class VesselTracerApp(QMainWindow):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="2D Vessel Tracer")
+    parser.add_argument("-i", "--input-dir", type=str, help="Path to the folder containing image sequence.")
+    # Add more arguments as needed, e.g., for start/end points, non-GUI mode, etc.
+    # parser.add_argument("--start-point", type=int, nargs=2, help="Coordinates of the start point (x y)")
+    # parser.add_argument("--end-point", type=int, nargs=2, help="Coordinates of the end point (x y)")
+    args = parser.parse_args()
+
     try:
         app = QApplication(sys.argv)
-        main_window = VesselTracerApp()
+        main_window = VesselTracerApp(args)
         main_window.show()
         sys.exit(app.exec_())
     except Exception as e:
