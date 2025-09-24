@@ -424,6 +424,50 @@ def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
     return identity_map
 
 
+def create_combined_identity_map(vessel_identity_map: Optional[np.ndarray],
+                                 layered_vessel_mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """
+    Combines temporal and layer-based identity maps into a single, more robust map.
+
+    A unique ID is assigned to each segment defined by a unique combination of
+    (vessel_id, layer_id). This correctly separates vessels that are either
+    temporally distinct or on different depth layers.
+
+    Args:
+        vessel_identity_map: The map tracking vessel connectivity over time.
+        layered_vessel_mask: The map tracking vessel depth based on brightness.
+
+    Returns:
+        A new identity map that incorporates both temporal and depth information,
+        or None if the inputs are invalid.
+    """
+    if vessel_identity_map is None or layered_vessel_mask is None:
+        return vessel_identity_map  # Fallback to the original map
+
+    combined_map = np.zeros_like(vessel_identity_map)
+    unique_pairs = {}
+    next_new_id = 1
+
+    # Find all pixels that are part of any vessel
+    vessel_pixels = np.argwhere(vessel_identity_map > 0)
+
+    for y, x in vessel_pixels:
+        vessel_id = vessel_identity_map[y, x]
+        layer_id = layered_vessel_mask[y, x]
+
+        # We only care about pixels that have a valid layer
+        if layer_id > 0:
+            pair = (vessel_id, layer_id)
+
+            if pair not in unique_pairs:
+                unique_pairs[pair] = next_new_id
+                next_new_id += 1
+
+            combined_map[y, x] = unique_pairs[pair]
+
+    return combined_map
+
+
 # --- State Management Enums ---
 
 class AppState(Enum):
@@ -1673,25 +1717,25 @@ class VesselTracerApp(QMainWindow):
         for img, desc in mask_steps_data:
             steps.append((self.convert_np_to_pixmap(img), f"Mask Generation - {desc}"))
 
-        # Added: Vessel Layering Step
+        # Create Layered Mask for Z-depth separation
         self.layered_vessel_mask = create_vessel_layers(final_mask, base_original_pip)
         if self.layered_vessel_mask is not None:
-            # Normalize to 0-255 for color mapping
             normalized_layers = cv2.normalize(self.layered_vessel_mask, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             layer_heatmap = cv2.applyColorMap(normalized_layers, cv2.COLORMAP_JET)
-            layer_heatmap[self.layered_vessel_mask == 0] = [0, 0, 0]  # Set background to black
+            layer_heatmap[self.layered_vessel_mask == 0] = [0, 0, 0]
             steps.append((self.convert_np_to_pixmap(layer_heatmap), "Vessel Layering (Bright=Top, Dark=Bottom)"))
 
-        # NEW: Vessel Identity Map Visualization
+        # Visualize original temporal identity map
         if self.vessel_identity_map is not None:
             max_id = np.max(self.vessel_identity_map)
             if max_id > 0:
-                # Use a colormap to give each vessel ID a unique color
                 norm_ids = cv2.normalize(self.vessel_identity_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                 identity_heatmap = cv2.applyColorMap(norm_ids, cv2.COLORMAP_JET)
-                identity_heatmap[self.vessel_identity_map == 0] = [0, 0, 0]  # Set background to black
-                steps.append((self.convert_np_to_pixmap(identity_heatmap), "Vessel Identity Map (Memory)"))
+                identity_heatmap[self.vessel_identity_map == 0] = [0, 0, 0]
+                steps.append((self.convert_np_to_pixmap(identity_heatmap), "Temporal Vessel Identity Map"))
 
+        # Create the definitive, combined identity map for pathfinding
+        combined_identity_map = create_combined_identity_map(self.vessel_identity_map, self.layered_vessel_mask)
 
         # 2. Cost Map Heatmap
         display_costmap = pathfinding_costmap.copy()
@@ -1709,11 +1753,9 @@ class VesselTracerApp(QMainWindow):
         # 3. Marked Points and Path Search Animation
         path_base_image = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
         for i, p in enumerate(mask_pixels):
-            color = (0, 255, 255)  # Yellow
-            if i == 0:
-                color = (0, 0, 255)  # Red
-            elif i == len(mask_pixels) - 1:
-                color = (255, 100, 0)  # Blue
+            color = (0, 255, 255)
+            if i == 0: color = (0, 0, 255)
+            elif i == len(mask_pixels) - 1: color = (255, 100, 0)
             cv2.circle(path_base_image, (p[1], p[0]), 5, color, -1)
         steps.append((self.convert_np_to_pixmap(path_base_image), "Located Marked Points on Mask"))
 
@@ -1721,39 +1763,29 @@ class VesselTracerApp(QMainWindow):
         QApplication.processEvents()
 
         exploration_img = path_base_image.copy()
-
         self.final_paths = []
         self.alternative_paths = []
-
-        # We now find end-to-end paths, not segments.
-        # So we only need the first and last marked points.
-        start_node = mask_pixels[0]
-        end_node = mask_pixels[-1]
+        start_node, end_node = mask_pixels[0], mask_pixels[-1]
 
         # --- Find up to 3 distinct end-to-end paths ---
         paths_found = []
         current_cost_map = pathfinding_costmap.copy()
         path_blocking_cost = 1e7
-
-        for _ in range(3): # Find a max of 3 paths
-            path = self.find_path_astar(current_cost_map, start_node, end_node, self.vessel_identity_map, viz_callback=None)
-
+        for _ in range(3):
+            path = self.find_path_astar(current_cost_map, start_node, end_node, combined_identity_map, viz_callback=None)
             if path:
                 paths_found.append(path)
-                # Block this path for the next search
                 for y, x in path:
                     if 0 <= y < current_cost_map.shape[0] and 0 <= x < current_cost_map.shape[1]:
                         current_cost_map[y, x] += path_blocking_cost
             else:
-                # No more paths can be found
                 break
 
         if paths_found:
-            self.final_paths = [paths_found[0]] # The first path is the main one
-            self.alternative_paths = paths_found[1:] # The rest are alternatives
+            self.final_paths = [paths_found[0]]
+            self.alternative_paths = paths_found[1:]
         else:
-            self.final_paths = []
-            self.alternative_paths = []
+            self.final_paths, self.alternative_paths = [], []
 
         if not self.final_paths:
             QMessageBox.warning(self, "Pathfinding Failed",
@@ -1762,7 +1794,6 @@ class VesselTracerApp(QMainWindow):
                                 "1. <b>Adjust Smoothing</b>: Change this in 'Mark & Configure' to alter mask connectivity.\n"
                                 "2. <b>Use Noise Areas</b>: If there's background interference, use 'Draw Noise Area' to exclude it.\n"
                                 "3. <b>Check Marked Points</b>: Ensure points are within clear vessel structures.")
-
             path_img = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
             steps.append((self.convert_np_to_pixmap(path_img), "Pathfinding Failed"))
             dialog = StepViewerDialog(steps, self)
@@ -1778,9 +1809,8 @@ class VesselTracerApp(QMainWindow):
             path_points_xy = path_points_yx[:, :, ::-1]
             cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
 
-
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
-                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
+                     "baseimage": path_base_image, "identity_map": combined_identity_map}
         steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
@@ -1971,7 +2001,10 @@ class VesselTracerApp(QMainWindow):
         def heuristic(p1, p2):
             return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
-        open_set = [(heuristic(start, end), 0, start)]  # f_cost, g_cost, pos
+        # The f_cost (first element) is set to g_cost, turning A* into Dijkstra's algorithm
+        # This explores based on actual path cost, not a heuristic, to satisfy the
+        # user's requirement of exploring all branches "simultaneously".
+        open_set = [(0, 0, start)]  # f_cost (priority), g_cost, pos
         came_from = {}
         g_costs = {start: 0}
         closed_set = set()
@@ -2040,7 +2073,8 @@ class VesselTracerApp(QMainWindow):
 
                     if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
                         g_costs[neighbor] = new_g_cost
-                        f_cost = new_g_cost + heuristic(neighbor, end)
+                        # By setting f_cost = new_g_cost, we are implementing Dijkstra's algorithm
+                        f_cost = new_g_cost
                         heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
                         came_from[neighbor] = current
 
