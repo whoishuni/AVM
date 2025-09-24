@@ -424,6 +424,44 @@ def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
     return identity_map
 
 
+def find_junctions(mask: np.ndarray) -> List[Tuple[int, int]]:
+    """
+    Finds junction points in a binary vessel mask.
+
+    Junctions are defined as pixels on the vessel skeleton that have three or
+    more neighbors. This is used to identify points where the vessel branches.
+
+    Args:
+        mask: The binary (0 or 255) vessel mask as a NumPy array.
+
+    Returns:
+        A list of (y, x) coordinates for each junction point found.
+    """
+    if mask is None or np.sum(mask) == 0:
+        return []
+
+    # Skeletonize the mask to get the centerline. The skeleton should be 0s and 1s for this.
+    skeleton = skeletonize(mask / 255).astype(np.uint8)
+
+    # Convolve with a 3x3 kernel of ones to count neighbors for each pixel
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    convolved = cv2.filter2D(skeleton, -1, kernel)
+
+    # A pixel on the skeleton is a junction if the sum of its 3x3 neighborhood is
+    # greater than 3.
+    # - Endpoint: Sum = 2 (pixel itself + 1 neighbor)
+    # - Line segment: Sum = 3 (pixel itself + 2 neighbors)
+    # - Junction: Sum > 3 (pixel itself + 3 or more neighbors)
+    junction_map = np.zeros_like(skeleton)
+    junction_map[(convolved > 3) & (skeleton > 0)] = 255
+
+    # Get the coordinates of the junction points
+    junction_coords = np.argwhere(junction_map > 0)
+
+    # Return as a list of (y, x) tuples
+    return [tuple(coords) for coords in junction_coords]
+
+
 # --- State Management Enums ---
 
 class AppState(Enum):
@@ -1643,6 +1681,63 @@ class VesselTracerApp(QMainWindow):
         self.display_image(base_image)
         self.statusBar().showMessage("Animation replay finished.", 3000)
 
+    def _explore_vessel_graph(self, start_node, critical_points, costmap, identity_map):
+        """
+        Builds a graph of critical points and explores it from a start node.
+        This finds all reachable branches from the starting point.
+        """
+        if not start_node or len(critical_points) < 2:
+            return []
+
+        # --- Step 1: Build the graph of direct connections between critical points ---
+        self.statusBar().showMessage("Building vessel graph...", 3000)
+        QApplication.processEvents()
+
+        graph = {p: [] for p in critical_points}
+        paths_cache = {}
+        point_list = list(critical_points)
+        temp_costmap = costmap.copy()
+
+        for i in range(len(point_list)):
+            for j in range(i + 1, len(point_list)):
+                p1 = point_list[i]
+                p2 = point_list[j]
+
+                # Reset the cost map for this pair
+                temp_costmap[:] = costmap[:]
+                # Block all other critical points to find a direct path
+                for p_obstacle in critical_points:
+                    if p_obstacle != p1 and p_obstacle != p2:
+                        temp_costmap[p_obstacle[0], p_obstacle[1]] = self.PATHFINDING_OBSTACLE_COST
+
+                path = self.find_path_astar(temp_costmap, p1, p2, identity_map)
+
+                if path:
+                    graph[p1].append(p2)
+                    graph[p2].append(p1)
+                    path_key = tuple(sorted((p1, p2)))
+                    paths_cache[path_key] = path
+
+        # --- Step 2: Traverse the graph from the start_node using BFS ---
+        self.statusBar().showMessage("Traversing vessel graph...", 3000)
+        QApplication.processEvents()
+
+        all_paths = []
+        queue = deque([start_node])
+        visited_nodes = {start_node}
+
+        while queue:
+            current_node = queue.popleft()
+            for neighbor in graph[current_node]:
+                if neighbor not in visited_nodes:
+                    visited_nodes.add(neighbor)
+                    queue.append(neighbor)
+                    path_key = tuple(sorted((current_node, neighbor)))
+                    if path_key in paths_cache:
+                        all_paths.append(paths_cache[path_key])
+
+        return all_paths
+
     def show_full_analysis_steps(self, final_mask, mask_pixels, pathfinding_costmap):
         """Prepares and shows the final step-by-step analysis results dialog.
 
@@ -1717,43 +1812,41 @@ class VesselTracerApp(QMainWindow):
             cv2.circle(path_base_image, (p[1], p[0]), 5, color, -1)
         steps.append((self.convert_np_to_pixmap(path_base_image), "Located Marked Points on Mask"))
 
+        # --- NEW: Find and visualize junctions ---
+        junctions = find_junctions(final_mask)
+        junction_viz_img = path_base_image.copy()
+        for y, x in junctions:
+            # Draw magenta circles on junctions for visualization
+            cv2.circle(junction_viz_img, (x, y), 7, (255, 0, 255), 2)
+        steps.append((self.convert_np_to_pixmap(junction_viz_img), "Detected Branching Points (Junctions)"))
+
+
         self.statusBar().showMessage("Executing pathfinding...", 5000)
         QApplication.processEvents()
 
         exploration_img = path_base_image.copy()
 
-        self.final_paths = []
-        self.alternative_paths = []
-
-        # We now find end-to-end paths, not segments.
-        # So we only need the first and last marked points.
+        # --- NEW: Graph-based exploration logic ---
         start_node = mask_pixels[0]
-        end_node = mask_pixels[-1]
+        critical_points = set(mask_pixels) | set(junctions)
 
-        # --- Find up to 3 distinct end-to-end paths ---
-        paths_found = []
-        current_cost_map = pathfinding_costmap.copy()
-        path_blocking_cost = 1e7
+        # Run the full graph exploration
+        all_path_segments = self._explore_vessel_graph(
+            start_node=start_node,
+            critical_points=critical_points,
+            costmap=pathfinding_costmap,
+            identity_map=self.vessel_identity_map
+        )
 
-        for _ in range(3): # Find a max of 3 paths
-            path = self.find_path_astar(current_cost_map, start_node, end_node, self.vessel_identity_map, viz_callback=None)
-
-            if path:
-                paths_found.append(path)
-                # Block this path for the next search
-                for y, x in path:
-                    if 0 <= y < current_cost_map.shape[0] and 0 <= x < current_cost_map.shape[1]:
-                        current_cost_map[y, x] += path_blocking_cost
-            else:
-                # No more paths can be found
-                break
-
-        if paths_found:
-            self.final_paths = [paths_found[0]] # The first path is the main one
-            self.alternative_paths = paths_found[1:] # The rest are alternatives
+        if all_path_segments:
+            self.final_paths = all_path_segments
         else:
-            self.final_paths = []
-            self.alternative_paths = []
+            # Fallback to simple start-to-end if graph exploration fails, for robustness
+            path = self.find_path_astar(pathfinding_costmap, start_node, mask_pixels[-1], self.vessel_identity_map, viz_callback=None)
+            self.final_paths = [path] if path else []
+
+        # The concept of "alternative paths" is now deprecated.
+        self.alternative_paths = []
 
         if not self.final_paths:
             QMessageBox.warning(self, "Pathfinding Failed",
@@ -1806,53 +1899,15 @@ class VesselTracerApp(QMainWindow):
 
         final_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
 
-        if not self.final_paths or not self.final_paths[0] or not self.vessel_masks or self.temporal_cost_map is None:
-            self.final_path_image = final_image
-        else:
-            # --- Create a frequency map to highlight the main path ---
-            h, w = base_original_pip.shape
-            frequency_map = np.zeros((h, w), dtype=np.float32)
-            labeled_masks = [cv2.connectedComponents(mask)[1] for mask in self.vessel_masks]
-            main_path = self.final_paths[0]
+        if self.final_paths:
+            # Draw all explored path segments
+            for path_segment in self.final_paths:
+                if not path_segment: continue
+                path_points_yx = np.array(path_segment, dtype=np.int32).reshape(-1, 1, 2)
+                path_points_xy = path_points_yx[:, :, ::-1]
+                cv2.polylines(final_image, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
 
-            for y, x in main_path:
-                if 0 <= y < h and 0 <= x < w:
-                    frame_idx = int(self.temporal_cost_map[y, x])
-                    if 0 <= frame_idx < len(labeled_masks):
-                        labeled_mask = labeled_masks[frame_idx]
-                        label = labeled_mask[y, x]
-                        if label > 0:
-                            frequency_map[labeled_mask == label] += 1
-
-            if np.max(frequency_map) > 0:
-                norm_freq_map = cv2.normalize(frequency_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                path_mask = (norm_freq_map > 0).astype(np.uint8)
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                dilated_path_mask = cv2.dilate(path_mask, kernel, iterations=1)
-                heatmap = cv2.applyColorMap(norm_freq_map, cv2.COLORMAP_HOT)
-                heatmap_on_path = cv2.bitwise_and(heatmap, heatmap, mask=dilated_path_mask)
-                background = cv2.bitwise_and(final_image, final_image, mask=~dilated_path_mask)
-                final_image = cv2.add(background, heatmap_on_path)
-
-                # Also draw a solid line for the main path's centerline for clarity
-                main_path_yx = np.array(main_path, dtype=np.int32).reshape(-1, 1, 2)
-                main_path_xy = main_path_yx[:, :, ::-1]
-                cv2.polylines(final_image, [main_path_xy], isClosed=False, color=(255, 255, 255), thickness=1)
-
-
-            # --- Draw alternative paths ---
-            if self.alternative_paths:
-                overlay = final_image.copy()
-                for alt_path in self.alternative_paths:
-                    if not alt_path: continue
-                    path_points_yx = np.array(alt_path, dtype=np.int32).reshape(-1, 1, 2)
-                    path_points_xy = path_points_yx[:, :, ::-1]
-                    cv2.polylines(overlay, [path_points_xy], isClosed=False, color=(255, 255, 0), thickness=3) # Cyan
-
-                alpha = 0.6 # Transparency
-                final_image = cv2.addWeighted(overlay, alpha, final_image, 1 - alpha, 0)
-
-            self.final_path_image = final_image
+        self.final_path_image = final_image
 
         # Redraw marked points on top
         for i, p_info in enumerate(self.path_points_info):
@@ -1905,46 +1960,30 @@ class VesselTracerApp(QMainWindow):
 
         traces = [vessel_trace]
 
-        # --- 2. Prepare data for the main path ---
-        if self.final_paths and self.final_paths[0]:
-            main_path = self.final_paths[0]
+        # --- 2. Prepare data for all explored paths ---
+        if self.final_paths:
             path_x, path_y, path_z = [], [], []
-            for y_coord, x_coord in main_path:
-                path_x.append(x_coord)
-                path_y.append(y_coord)
-                if self.temporal_cost_map is not None and 0 <= y_coord < self.temporal_cost_map.shape[0] and 0 <= x_coord < self.temporal_cost_map.shape[1]:
-                    path_z.append(self.temporal_cost_map[y_coord, x_coord])
-                else:
-                    path_z.append(0) # Fallback
-
-            main_trace = go.Scatter3d(
-                x=path_x, y=path_y, z=path_z,
-                mode='lines',
-                line=dict(color='lime', width=8),
-                name='Main Path'
-            )
-            traces.append(main_trace)
-
-        # --- 3. Prepare data for alternative paths ---
-        if self.alternative_paths:
-            for i, alt_path in enumerate(self.alternative_paths):
-                if not alt_path: continue
-                path_x, path_y, path_z = [], [], []
-                for y_coord, x_coord in alt_path:
+            for segment in self.final_paths:
+                if not segment: continue
+                for y_coord, x_coord in segment:
                     path_x.append(x_coord)
                     path_y.append(y_coord)
                     if self.temporal_cost_map is not None and 0 <= y_coord < self.temporal_cost_map.shape[0] and 0 <= x_coord < self.temporal_cost_map.shape[1]:
                         path_z.append(self.temporal_cost_map[y_coord, x_coord])
                     else:
                         path_z.append(0) # Fallback
+                # Add a break in the line for Plotly
+                path_x.append(None)
+                path_y.append(None)
+                path_z.append(None)
 
-                alt_trace = go.Scatter3d(
-                    x=path_x, y=path_y, z=path_z,
-                    mode='lines',
-                    line=dict(color='cyan', width=4, dash='dot'),
-                    name=f'Alternative {i+1}'
-                )
-                traces.append(alt_trace)
+            explored_trace = go.Scatter3d(
+                x=path_x, y=path_y, z=path_z,
+                mode='lines',
+                line=dict(color='lime', width=8),
+                name='Explored Paths'
+            )
+            traces.append(explored_trace)
 
         return traces
 
