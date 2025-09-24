@@ -616,6 +616,23 @@ class YC_VesselTracerApp(QMainWindow):
             self.vessel_masks = None
             self.statusBar().showMessage("Parameters updated.")
 
+    def show_step_viewer(self):
+        if self.app_state not in [AppState.RANGE_CONFIRMED, AppState.DONE]: return
+        self.statusBar().showMessage("Preparing step viewer...", 5000)
+        QApplication.processEvents()
+
+        frame_range = self._get_frame_range(for_processing=False)
+        if not frame_range: return
+        start_f, end_f = frame_range
+        image_to_process = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+
+        step_data = generate_mask_steps(image_to_process, self.smoothing_level, self.params, self.global_background_color)
+
+        qt_steps = [(convert_np_to_pixmap(img), desc) for img, desc in step_data]
+        dialog = YC_StepViewerDialog(qt_steps, self)
+        dialog.exec()
+        self.statusBar().showMessage("Ready")
+
     def replay_path_animation(self, anim_data):
         self.statusBar().showMessage("Replaying pathfinding animation...")
         cost_map = anim_data["costmap"]
