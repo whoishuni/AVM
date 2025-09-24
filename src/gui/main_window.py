@@ -103,6 +103,19 @@ class YC_VesselTracerApp(QMainWindow):
                 "info_processing": "Running analysis, please wait...",
                 "info_done": "Path analysis is complete! Reset to start a new analysis.",
                 "info_drawing_noise": "Drag the mouse on the image to draw a noise area to exclude.",
+                "param_bg_removal_offset_desc": "Offset for adaptive thresholding to remove background. Higher values remove more background but may clip vessels.",
+                "param_bg_removal_kernel_size": "Size of the kernel for background estimation. Must be an odd number. Larger values handle uneven lighting better.",
+                "param_max_node_search_radius_desc": "The maximum distance (in pixels) to search for a vessel segment when a point is clicked.",
+                "param_max_gap_bridge_distance_desc": "The maximum gap size (in pixels) the pathfinder will attempt to bridge between vessel segments.",
+                "param_forbidden_zone_radius_desc": "Radius around a path start/end point where the pathfinder cannot re-enter, preventing loops.",
+                "param_time_cost_weight_desc": "Weight multiplier for the cost of moving between frames (time). Higher values prefer shorter paths in time.",
+                "param_pathfinding_obstacle_cost_desc": "The absolute cost of a pixel that is considered an obstacle. Should be a very large number.",
+                "param_turn_penalty_weight_desc": "Penalty applied for turning. Higher values result in straighter paths.",
+                "param_dynamic_cost_weight_desc": "Multiplier for the cost dynamically added to the path to discourage re-using the same pixels for alternative paths.",
+                "param_straight_path_threshold_desc": "Cosine similarity threshold to consider a path segment 'straight'. Used for penalizing turns.",
+                "param_cross_vessel_penalty_desc": "A large penalty applied when a path crosses into a different vessel, based on the identity map.",
+                "param_main_vessel_width_tolerance_desc": "Tolerance (as a percentage) for how much a side branch's width can deviate from the main vessel's width.",
+                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch."
             },
             "zh": {
                 "app_title": "YC_血管尋路", "select_folder": "選擇圖片資料夾",
@@ -127,6 +140,19 @@ class YC_VesselTracerApp(QMainWindow):
                 "info_processing": "正在執行分析，請稍候...",
                 "info_done": "路徑分析完成！點擊 '全部重置' 來開始新的分析。",
                 "info_drawing_noise": "在影像上拖動滑鼠以繪製要排除的雜訊區域。",
+                "param_bg_removal_offset_desc": "用於自適應閾值以去除背景的偏移量。值越高，去除的背景越多，但可能會裁切到血管。",
+                "param_bg_removal_kernel_size": "用於背景估計的核心大小。必須是奇數。較大的值能更好地處理不均勻光照。",
+                "param_max_node_search_radius_desc": "點擊某個點時，搜尋血管片段的最大距離（以像素為單位）。",
+                "param_max_gap_bridge_distance_desc": "路徑尋找器將嘗試橋接的血管片段之間的最大間隙大小（以像素為單位）。",
+                "param_forbidden_zone_radius_desc": "路徑起點/終點周圍的半徑，路徑尋找器不能重新進入該區域，以防止循環。",
+                "param_time_cost_weight_desc": "在幀（時間）之間移動的成本的權重乘數。較高的值偏好在時間上更短的路徑。",
+                "param_pathfinding_obstacle_cost_desc": "被視為障礙的像素的絕對成本。應該是一個非常大的數字。",
+                "param_turn_penalty_weight_desc": "轉彎時應用的懲罰。較高的值會產生更直的路徑。",
+                "param_dynamic_cost_weight_desc": "動態增加到路徑的成本的乘數，以不鼓勵為替代路徑重複使用相同的像素。",
+                "param_straight_path_threshold_desc": "用於判斷路徑片段是否為「直線」的餘弦相似度閾值。用於懲罰轉彎。",
+                "param_cross_vessel_penalty_desc": "當路徑根據身份圖跨越到不同的血管時，應用的巨大懲罰。",
+                "param_main_vessel_width_tolerance_desc": "側枝寬度與主血管寬度可以偏離的容差（百分比）。",
+                "param_side_branch_turn_penalty_multiplier_desc": "當路徑正在探索潛在的側枝時，專門為轉彎懲罰應用的乘數。"
             }
         }
         return translations
@@ -351,35 +377,15 @@ class YC_VesselTracerApp(QMainWindow):
             self.info_label.setText(self.tr("info_drawing_noise"))
 
     def keyPressEvent(self, event):
-        pan_amount = 15
-        if event.key() == Qt.Key.Key_Up:
-            self.image_label.pan_image(0, pan_amount)
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_Down:
-            self.image_label.pan_image(0, -pan_amount)
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_Left:
-            self.image_label.pan_image(pan_amount, 0)
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_Right:
-            self.image_label.pan_image(-pan_amount, 0)
-            event.accept()
-            return
-
         if not self.images or self.app_state not in [AppState.LOADED, AppState.MARKING_PATH]:
             super().keyPressEvent(event)
             return
-
         current_idx = self.current_frame_index
         new_idx = -1
         if event.key() == Qt.Key.Key_D:
             new_idx = min(len(self.images) - 1, current_idx + 1)
         elif event.key() == Qt.Key.Key_A:
             new_idx = max(0, current_idx - 1)
-
         if new_idx != -1 and new_idx != current_idx:
             self.frame_slider.setValue(new_idx)
         else:
@@ -677,17 +683,8 @@ class YC_VesselTracerApp(QMainWindow):
             return
 
         fig = go.Figure(data=plot_traces)
-        fig.update_layout(
-            title_text='YC 3D Vessel Path',
-            scene=dict(
-                xaxis_title='X',
-                yaxis_title='Y',
-                zaxis_title='Frame (Time)',
-                aspectratio=dict(x=1, y=1, z=0.5),
-                zaxis=dict(autorange="reversed")  # Reverse Z-axis so frame 0 is at the top
-            ),
-            margin=dict(l=0, r=0, b=0, t=40)
-        )
+        fig.update_layout(title_text='YC 3D Vessel Path', scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Frame (Time)', aspectratio=dict(x=1, y=1, z=0.5)), margin=dict(l=0, r=0, b=0, t=40))
+        fig.update_scenes(yaxis_autorange="reversed")
         html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
 
         dialog = YC_PlotlyViewerDialog(html_content, self)
