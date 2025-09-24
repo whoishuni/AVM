@@ -907,8 +907,10 @@ class VesselTracerApp(QMainWindow):
     FORBIDDEN_ZONE_RADIUS = 30
     TIME_COST_WEIGHT = 1.0
     PATHFINDING_OBSTACLE_COST = 1e9
-    TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
-    CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
+    TURN_PENALTY_WEIGHT = 50.0
+    CROSS_VESSEL_PENALTY = 1e6
+    MAIN_VESSEL_WIDTH_TOLERANCE = 0.30  # 30% tolerance for a vessel to be considered "main"
+    SIDE_BRANCH_TURN_PENALTY_MULTIPLIER = 10.0  # Make turns in side branches more costly
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
@@ -1652,6 +1654,8 @@ class VesselTracerApp(QMainWindow):
         pixels = anim_data["pixels"]
         base_image = anim_data["baseimage"]
         identity_map = anim_data["identity_map"]
+        width_map = anim_data["width_map"]
+        main_vessel_width = anim_data["main_vessel_width"]
 
         def update_visualization(visited):
             temp_img = base_image.copy()
@@ -1672,11 +1676,11 @@ class VesselTracerApp(QMainWindow):
                            self.PATHFINDING_OBSTACLE_COST, -1)
 
             segment = self.find_path_astar(current_costmap, start_node, end_node, identity_map,
-                                           viz_callback=update_visualization)
+                                           width_map, main_vessel_width, viz_callback=update_visualization)
             if segment is None:
                 # If not found with forbidden zone, try again without it
                 segment = self.find_path_astar(cost_map, start_node, end_node, identity_map,
-                                               viz_callback=update_visualization)
+                                               width_map, main_vessel_width, viz_callback=update_visualization)
 
             if segment:
                 full_path.extend(segment if i == 0 else segment[1:])
@@ -1737,6 +1741,11 @@ class VesselTracerApp(QMainWindow):
         # Create the definitive, combined identity map for pathfinding
         combined_identity_map = create_combined_identity_map(self.vessel_identity_map, self.layered_vessel_mask)
 
+        # Create a width map using distance transform to guide pathfinding logic
+        width_map = cv2.distanceTransform(final_mask.astype(np.uint8), cv2.DIST_L2, 5)
+        start_node = mask_pixels[0]
+        main_vessel_width = 2 * width_map[start_node[0], start_node[1]] if width_map is not None else 0
+
         # 2. Cost Map Heatmap
         display_costmap = pathfinding_costmap.copy()
         valid_pixels = display_costmap < self.PATHFINDING_OBSTACLE_COST
@@ -1765,14 +1774,15 @@ class VesselTracerApp(QMainWindow):
         exploration_img = path_base_image.copy()
         self.final_paths = []
         self.alternative_paths = []
-        start_node, end_node = mask_pixels[0], mask_pixels[-1]
+        end_node = mask_pixels[-1]
 
         # --- Find up to 3 distinct end-to-end paths ---
         paths_found = []
         current_cost_map = pathfinding_costmap.copy()
         path_blocking_cost = 1e7
         for _ in range(3):
-            path = self.find_path_astar(current_cost_map, start_node, end_node, combined_identity_map, viz_callback=None)
+            path = self.find_path_astar(current_cost_map, start_node, end_node, combined_identity_map,
+                                      width_map, main_vessel_width, viz_callback=None)
             if path:
                 paths_found.append(path)
                 for y, x in path:
@@ -1810,7 +1820,8 @@ class VesselTracerApp(QMainWindow):
             cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
 
         anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
-                     "baseimage": path_base_image, "identity_map": combined_identity_map}
+                     "baseimage": path_base_image, "identity_map": combined_identity_map,
+                     "width_map": width_map, "main_vessel_width": main_vessel_width}
         steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
 
         # 5. Final Result
@@ -1978,18 +1989,20 @@ class VesselTracerApp(QMainWindow):
 
         return traces
 
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None):
-        """Finds the optimal path between two points using the A* algorithm.
+    def find_path_astar(self, cost_map, start, end, identity_map, width_map, main_vessel_width, viz_callback=None):
+        """Finds the optimal path between two points using a modified Dijkstra's algorithm.
 
         This implementation includes costs for distance, time (frame index),
-        path curvature (turn penalty), and for crossing between different
-        vessel structures (cross vessel penalty).
+        and dynamic penalties for path curvature and vessel crossing based on
+        whether the path is on a 'main' or 'side' vessel.
 
         Args:
             cost_map: The base cost map (incorporating temporal cost).
             start: The starting (y, x) coordinate tuple.
             end: The ending (y, x) coordinate tuple.
-            vessel_identity_map: The map assigning a unique ID to each vessel.
+            identity_map: The map assigning a unique ID to each vessel segment.
+            width_map: A map where pixel values correspond to vessel width.
+            main_vessel_width: The characteristic width of the main vessel.
             viz_callback: An optional function to call for visualizing the search.
 
         Returns:
@@ -1998,12 +2011,6 @@ class VesselTracerApp(QMainWindow):
         if cost_map[start] >= self.PATHFINDING_OBSTACLE_COST or cost_map[end] >= self.PATHFINDING_OBSTACLE_COST:
             return None
 
-        def heuristic(p1, p2):
-            return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
-
-        # The f_cost (first element) is set to g_cost, turning A* into Dijkstra's algorithm
-        # This explores based on actual path cost, not a heuristic, to satisfy the
-        # user's requirement of exploring all branches "simultaneously".
         open_set = [(0, 0, start)]  # f_cost (priority), g_cost, pos
         came_from = {}
         g_costs = {start: 0}
@@ -2018,7 +2025,6 @@ class VesselTracerApp(QMainWindow):
             if current == end:
                 if viz_callback:
                     viz_callback(list(closed_set))
-
                 path = []
                 while current in came_from:
                     path.append(current)
@@ -2043,29 +2049,40 @@ class VesselTracerApp(QMainWindow):
                             neighbor in closed_set:
                         continue
 
-                    # --- Vessel identity penalty ---
-                    cross_vessel_penalty = 0
-                    if vessel_identity_map is not None:
-                        current_id = vessel_identity_map[current]
-                        neighbor_id = vessel_identity_map[neighbor]
-                        if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
-                            cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
+                    # --- Dynamic Penalties based on Vessel Type (Main vs. Side) ---
+                    neighbor_width = 2 * width_map[neighbor]
+                    is_on_main_vessel = abs(neighbor_width - main_vessel_width) <= (main_vessel_width * self.MAIN_VESSEL_WIDTH_TOLERANCE)
 
-                    # --- Morphology-aware path penalty ---
+                    # 1. Vessel Crossing Penalty
+                    cross_vessel_penalty = 0
+                    if identity_map is not None:
+                        current_id = identity_map[current]
+                        neighbor_id = identity_map[neighbor]
+                        if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
+                            if is_on_main_vessel:
+                                # Main vessels can have intersections, but still penalize them.
+                                cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
+                            else:
+                                # Side branches cannot have intersections. Forbid the move.
+                                cross_vessel_penalty = self.PATHFINDING_OBSTACLE_COST
+
+                    # 2. Turn Penalty
                     turn_penalty = 0
                     parent = came_from.get(current)
                     if parent:
                         v1 = (current[0] - parent[0], current[1] - parent[1])
                         v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
-
                         dot_product = v1[0] * v2[0] + v1[1] * v2[1]
-                        mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
-                        mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
-
+                        mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
+                        mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
                         if mag1 > 0 and mag2 > 0:
-                            # 1 - cos(theta) gives a value from 0 (straight) to 2 (180-degree turn)
                             cosine_similarity = dot_product / (mag1 * mag2)
-                            turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
+                            base_turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
+                            if not is_on_main_vessel:
+                                # Apply a much higher penalty for turning in a side branch.
+                                turn_penalty = base_turn_penalty * self.SIDE_BRANCH_TURN_PENALTY_MULTIPLIER
+                            else:
+                                turn_penalty = base_turn_penalty
 
                     move_cost = np.sqrt(dr ** 2 + dc ** 2)
                     time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
@@ -2073,7 +2090,6 @@ class VesselTracerApp(QMainWindow):
 
                     if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
                         g_costs[neighbor] = new_g_cost
-                        # By setting f_cost = new_g_cost, we are implementing Dijkstra's algorithm
                         f_cost = new_g_cost
                         heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
                         came_from[neighbor] = current
