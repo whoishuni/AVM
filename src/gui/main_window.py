@@ -7,12 +7,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QFileDialog, QLabel, QStatusBar, QMainWindow, QMessageBox,
-<<<<<<< HEAD
-    QSizePolicy, QProgressDialog, QSlider, QDialog,
-    QGroupBox, QStyle
-=======
     QSizePolicy, QProgressDialog, QSlider, QDialog, QGroupBox, QStyle
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
 )
 from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
@@ -49,12 +44,6 @@ class YC_VesselTracerApp(QMainWindow):
         "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0
     }
 
-<<<<<<< HEAD
-    def __init__(self):
-        super().__init__()
-        self.params = self.DEFAULT_PARAMS.copy()
-        self.setWindowTitle("YC_VesselTracer")
-=======
     def __init__(self, language="en"):
         super().__init__()
         self.language = language
@@ -62,7 +51,6 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.params = self.DEFAULT_PARAMS.copy()
         self.setWindowTitle(self.tr("app_title"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         self.setGeometry(100, 100, 1280, 960)
         self.set_stylesheet()
 
@@ -87,12 +75,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.create_actions()
         self.create_menus()
         self.connect_signals()
-<<<<<<< HEAD
-        self.update_ui_for_state()
-
-    def set_stylesheet(self):
-        # Stylesheet remains the same as before
-=======
         self.retranslate_ui()
         self.update_ui_for_state()
 
@@ -180,7 +162,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
     def set_stylesheet(self):
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         style = """
             QMainWindow { background-color: #2E2E2E; }
             QGroupBox {
@@ -219,50 +200,10 @@ class YC_VesselTracerApp(QMainWindow):
         """
         self.setStyleSheet(style)
 
-<<<<<<< HEAD
-
-=======
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
     def init_ui(self):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
-<<<<<<< HEAD
-
-        main_controls_layout = QHBoxLayout()
-        self.layout.addLayout(main_controls_layout)
-
-        group1 = QGroupBox("Step 1: Load Images")
-        group1_layout = QHBoxLayout(group1)
-        self.btn_select_folder = QPushButton("Select Image Folder")
-        self.btn_select_folder.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        group1_layout.addWidget(self.btn_select_folder)
-        main_controls_layout.addWidget(group1)
-
-        group2 = QGroupBox("Step 2: Mark & Configure")
-        group2_layout = QHBoxLayout(group2)
-        self.btn_add_noise_roi = QPushButton("Draw Noise Area")
-        self.btn_smoothing_preview = QPushButton("Adjust Smoothing")
-        group2_layout.addWidget(self.btn_add_noise_roi)
-        group2_layout.addWidget(self.btn_smoothing_preview)
-        main_controls_layout.addWidget(group2)
-        self.group_tools = group2
-
-        group3 = QGroupBox("Step 3: Execute")
-        group3_layout = QHBoxLayout(group3)
-        self.btn_main_action = QPushButton("Start Marking Path")
-        self.btn_main_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
-        group3_layout.addWidget(self.btn_main_action)
-        main_controls_layout.addWidget(group3)
-
-        group4 = QGroupBox("View & Reset")
-        group4_layout = QHBoxLayout(group4)
-        self.btn_show_path = QPushButton("Preview Mask")
-        self.btn_show_3d_view = QPushButton("Show 3D View")
-        self.btn_step_view = QPushButton("View Steps")
-        self.btn_reset = QPushButton("Reset All")
-        self.btn_reset.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
-=======
         main_controls_layout = QHBoxLayout()
         self.layout.addLayout(main_controls_layout)
 
@@ -293,16 +234,11 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_show_3d_view = QPushButton()
         self.btn_step_view = QPushButton()
         self.btn_reset = QPushButton()
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         group4_layout.addWidget(self.btn_show_path)
         group4_layout.addWidget(self.btn_show_3d_view)
         group4_layout.addWidget(self.btn_step_view)
         group4_layout.addWidget(self.btn_reset)
-<<<<<<< HEAD
-        main_controls_layout.addWidget(group4)
-=======
         main_controls_layout.addWidget(self.group_view_reset)
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
 
         frame_nav_layout = QHBoxLayout()
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -315,11 +251,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.image_label = YC_ImageLabel(self)
         self.layout.addWidget(self.image_label, 1)
 
-<<<<<<< HEAD
-        self.info_label = QLabel("Please load an image folder to begin.")
-=======
         self.info_label = QLabel()
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = self.info_label.font()
         font.setPointSize(14)
@@ -329,34 +261,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.setStatusBar(QStatusBar(self))
 
     def create_actions(self):
-<<<<<<< HEAD
-        self.open_action = QAction("&Open Folder...", self, shortcut=QKeySequence.StandardKey.Open, triggered=self.select_folder)
-        self.reset_action = QAction("&Reset", self, shortcut="Ctrl+R", triggered=self.reset_system)
-        self.exit_action = QAction("E&xit", self, shortcut=QKeySequence.StandardKey.Quit, triggered=self.close)
-        self.settings_action = QAction("&Parameters...", self, shortcut="Ctrl+P", triggered=self.open_parameter_settings)
-        self.zoom_in_action = QAction("Zoom &In", self, shortcut=QKeySequence.StandardKey.ZoomIn, triggered=self.image_label.zoom_in)
-        self.zoom_out_action = QAction("Zoom &Out", self, shortcut=QKeySequence.StandardKey.ZoomOut, triggered=self.image_label.zoom_out)
-        self.reset_zoom_action = QAction("Reset &Zoom", self, shortcut="Ctrl+0", triggered=self.image_label.reset_zoom)
-        self.help_action = QAction("&Controls...", self, shortcut="F1", triggered=self.show_help_dialog)
-
-    def create_menus(self):
-        menu_bar = self.menuBar()
-        file_menu = menu_bar.addMenu("&File")
-        file_menu.addAction(self.open_action)
-        file_menu.addAction(self.reset_action)
-        file_menu.addSeparator()
-        file_menu.addAction(self.exit_action)
-        edit_menu = menu_bar.addMenu("&Edit")
-        edit_menu.addAction(self.settings_action)
-        view_menu = menu_bar.addMenu("&View")
-        view_menu.addAction(self.zoom_in_action)
-        view_menu.addAction(self.zoom_out_action)
-        view_menu.addAction(self.reset_zoom_action)
-        help_menu = menu_bar.addMenu("&Help")
-        help_menu.addAction(self.help_action)
-
-    def connect_signals(self):
-=======
         self.open_action = QAction(self)
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.reset_action = QAction(self)
@@ -400,7 +304,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.reset_zoom_action.triggered.connect(self.image_label.reset_zoom)
         self.help_action.triggered.connect(self.show_help_dialog)
 
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         self.btn_select_folder.clicked.connect(self.select_folder)
         self.btn_main_action.clicked.connect(self.handle_main_action)
         self.btn_reset.clicked.connect(self.reset_system)
@@ -415,24 +318,6 @@ class YC_VesselTracerApp(QMainWindow):
 
     def update_ui_for_state(self):
         is_interactive = self.app_state != AppState.PROCESSING
-<<<<<<< HEAD
-        state_configs = {
-            AppState.IDLE: {"main_action_text": "Start Marking Path", "main_action_enabled": False, "info_text": "Click 'Select Image Folder' or use File > Open Folder to begin.", "status_text": "Ready", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": True},
-            AppState.LOADED: {"main_action_text": "Start Marking Path", "main_action_enabled": True, "info_text": "Images loaded. Click 'Start Marking Path' to begin selecting points.", "status_text": f"{len(self.images)} images loaded.", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": True},
-            AppState.MARKING_PATH: {"main_action_text": "Confirm Points", "main_action_enabled": len(self.path_points_info) >= 2, "info_text": f"Marked {len(self.path_points_info)} points. Use 'A'/'D' or slider to switch frames. Click to mark.", "status_text": "Marking path...", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False},
-            AppState.RANGE_CONFIRMED: {"main_action_text": "Run Full Analysis", "main_action_enabled": True, "info_text": f"Points confirmed. Smoothing: {self.smoothing_level}. Draw noise areas or start analysis.", "status_text": "Ready for analysis...", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False},
-            AppState.PROCESSING: {"main_action_text": "Processing...", "main_action_enabled": False, "info_text": "Running analysis, please wait...", "status_text": "Processing...", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False},
-            AppState.DONE: {"main_action_text": "Analysis Complete", "main_action_enabled": False, "info_text": "Path analysis is complete! Reset to start a new analysis.", "status_text": "Done", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False}
-        }
-        config = state_configs.get(self.app_state, state_configs[AppState.IDLE])
-        self.btn_main_action.setText(config["main_action_text"])
-        self.btn_main_action.setEnabled(config["main_action_enabled"] and is_interactive)
-        self.info_label.setText(config["info_text"])
-        self.statusBar().showMessage(config["status_text"])
-        self.group_tools.setVisible(config["tools_visible"])
-        self.btn_show_path.setVisible(config["tools_visible"])
-        self.btn_step_view.setVisible(config["tools_visible"])
-=======
         # State configurations with translatable keys
         state_configs = {
             AppState.IDLE: {"main_action_key": "start_marking", "main_action_enabled": False, "info_key": "info_idle", "status_key": "Ready", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": True},
@@ -452,7 +337,6 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.statusBar().showMessage(self.tr(config.get("status_key", "Ready")))
         self.group_tools.setVisible(config["tools_visible"])
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         self.btn_show_3d_view.setVisible(self.app_state == AppState.DONE)
         self.frame_slider.setEnabled(config["slider_enabled"])
         self.btn_select_folder.setEnabled(config["select_folder_enabled"] and is_interactive)
@@ -464,11 +348,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.zoom_out_action.setEnabled(bool(self.images))
         self.reset_zoom_action.setEnabled(bool(self.images))
         if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
-<<<<<<< HEAD
-            self.info_label.setText("Drag the mouse on the image to draw a noise area to exclude.")
-=======
             self.info_label.setText(self.tr("info_drawing_noise"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
 
     def keyPressEvent(self, event):
         if not self.images or self.app_state not in [AppState.LOADED, AppState.MARKING_PATH]:
@@ -486,11 +366,7 @@ class YC_VesselTracerApp(QMainWindow):
             super().keyPressEvent(event)
 
     def select_folder(self):
-<<<<<<< HEAD
-        path = QFileDialog.getExistingDirectory(self, "Select Image Folder")
-=======
         path = QFileDialog.getExistingDirectory(self, self.tr("select_folder"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         if path:
             self.reset_system()
             self.images = load_images_from_folder(path)
@@ -513,23 +389,14 @@ class YC_VesselTracerApp(QMainWindow):
         if not self.images or not (0 <= frame_index < len(self.images)):
             return
         self.current_frame_index = frame_index
-<<<<<<< HEAD
-        self.frame_info_label.setText(f"Frame: {frame_index + 1}/{len(self.images)}")
-=======
         self.frame_info_label.setText(self.tr("frame_label", frame_index + 1, len(self.images)))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         base_img = self.images[frame_index].copy()
         display_img = self.get_overlayed_display_image(base_img, frame_index)
         pixmap = convert_np_to_pixmap(display_img)
         self.image_label.setPixmap(pixmap)
 
     def get_overlayed_display_image(self, base_image_gray: np.ndarray, frame_index: Optional[int]) -> np.ndarray:
-<<<<<<< HEAD
-        if frame_index is None:
-            frame_index = self.current_frame_index
-=======
         if frame_index is None: frame_index = self.current_frame_index
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         display_img_bgr = cv2.cvtColor(base_image_gray, cv2.COLOR_GRAY2BGR)
         for i, p_info in enumerate(self.path_points_info):
             pt = p_info["point"]
@@ -633,11 +500,7 @@ class YC_VesselTracerApp(QMainWindow):
         if not frame_range: return False
         start_f, end_f = frame_range
         images_subset = self.images[start_f: end_f + 1]
-<<<<<<< HEAD
-        progress = QProgressDialog("Generating vessel masks...", "Cancel", 0, len(images_subset), self)
-=======
         progress = QProgressDialog(self.tr("info_processing"), "Cancel", 0, len(images_subset), self)
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         updater = ProgressUpdater(progress)
         masks = create_enhanced_vessel_masks(images_subset, self.noise_rois, self.global_background_color, self.params, self.smoothing_level, updater)
@@ -680,11 +543,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.show_full_analysis_steps(final_mask, mask_pixels)
 
     def show_full_analysis_steps(self, final_mask, mask_pixels):
-<<<<<<< HEAD
-        self.statusBar().showMessage("Preparing full analysis steps...")
-=======
         self.statusBar().showMessage(self.tr("info_processing"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         QApplication.processEvents()
         steps = []
         frame_range = self._get_frame_range(for_processing=False)
@@ -708,11 +567,7 @@ class YC_VesselTracerApp(QMainWindow):
         width_map = cv2.distanceTransform(final_mask.astype(np.uint8), cv2.DIST_L2, 5)
         main_vessel_width = 2 * width_map[mask_pixels[0]] if width_map is not None else 0
 
-<<<<<<< HEAD
-        self.statusBar().showMessage("Executing pathfinding...")
-=======
         self.statusBar().showMessage(self.tr("info_processing"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         QApplication.processEvents()
 
         cumulative_cost_map = self.temporal_cost_map.copy()
@@ -793,11 +648,7 @@ class YC_VesselTracerApp(QMainWindow):
         if self.app_state != AppState.DONE:
             QMessageBox.warning(self, "Not Ready", "Please run a full analysis first.")
             return
-<<<<<<< HEAD
-        self.statusBar().showMessage("Generating 3D plot...")
-=======
         self.statusBar().showMessage(self.tr("info_processing"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         QApplication.processEvents()
 
         plot_traces = self.generate_3d_plot_data()
@@ -854,9 +705,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
     def show_help_dialog(self):
-<<<<<<< HEAD
-        dialog = YC_HelpDialog(self)
-=======
         param_meta = {
             "BG_REMOVAL_THRESHOLD_OFFSET": (self.tr("param_bg_removal_offset_desc"), int, 0, 100),
             "BG_REMOVAL_KERNEL_SIZE": (self.tr("param_bg_removal_kernel_desc"), int, 1, 51),
@@ -873,7 +721,6 @@ class YC_VesselTracerApp(QMainWindow):
             "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": (self.tr("param_side_branch_turn_penalty_multiplier_desc"), float, 1.0, 50.0),
         }
         dialog = YC_HelpDialog(param_meta, self)
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         dialog.exec()
 
     def open_parameter_settings(self):
@@ -885,11 +732,7 @@ class YC_VesselTracerApp(QMainWindow):
 
     def show_step_viewer(self):
         if self.app_state not in [AppState.RANGE_CONFIRMED, AppState.DONE]: return
-<<<<<<< HEAD
-        self.statusBar().showMessage("Preparing step viewer...", 5000)
-=======
         self.statusBar().showMessage(self.tr("info_processing"))
->>>>>>> 630a509a70df959a81c11e134774946f2620d6e9
         QApplication.processEvents()
 
         frame_range = self._get_frame_range(for_processing=False)
