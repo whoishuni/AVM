@@ -1,3 +1,4 @@
+from typing import Optional
 from PyQt6.QtWidgets import QLabel, QSizePolicy
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
@@ -14,8 +15,8 @@ class YC_ImageLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_window = parent
-        self.current_pixmap: QPixmap | None = None
-        self.current_drawing_roi: QRect | None = None
+        self.current_pixmap: Optional[QPixmap] = None
+        self.current_drawing_roi: Optional[QRect] = None
         self.is_drawing_roi: bool = False
 
         self.zoom_factor = 1.0
@@ -49,7 +50,7 @@ class YC_ImageLabel(QLabel):
         self.zoom_factor = max(0.1, min(self.zoom_factor, 20.0))
         self.update()
 
-    def get_image_coords(self, event_pos: QPoint) -> QPoint | None:
+    def get_image_coords(self, event_pos: QPoint) -> Optional[QPoint]:
         if not self.current_pixmap:
             return None
 
