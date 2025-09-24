@@ -458,7 +458,7 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.layered_vessel_mask = create_vessel_layers(final_mask, base_original_pip)
         if self.layered_vessel_mask is not None:
-            normalized_layers = cv2.normalize(self.layered_vessel_mask, None, 0, 255, cv2.NORM_MINMAX, dtype=np.uint8)
+            normalized_layers = cv2.normalize(self.layered_vessel_mask, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             layer_heatmap = cv2.applyColorMap(normalized_layers, cv2.COLORMAP_JET)
             layer_heatmap[self.layered_vessel_mask == 0] = [0, 0, 0]
             steps.append((convert_np_to_pixmap(layer_heatmap), "Vessel Layering (Z-depth)"))
