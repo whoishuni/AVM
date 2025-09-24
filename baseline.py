@@ -1122,7 +1122,7 @@ class VesselTracerApp(QMainWindow):
 
         fig = go.Figure(data=plot_traces)
         fig.update_layout(
-            title_text='3D Vessel Reconstruction',
+            title_text='3D Vessel Reconstruction and Found Paths',
             scene=dict(
                 xaxis_title='X (pixels)',
                 yaxis_title='Y (pixels)',
@@ -1132,6 +1132,42 @@ class VesselTracerApp(QMainWindow):
             ),
             margin=dict(l=0, r=0, b=0, t=40) # Reduce margins
         )
+
+        # --- Add Buttons for Path Visibility ---
+        num_paths = len(self.final_paths) + len(self.alternative_paths)
+        buttons = []
+
+        # Button to show all paths
+        all_visible = [True] * (len(plot_traces)) # Keep vessel structure visible
+        buttons.append(dict(label="Show All Paths",
+                            method="update",
+                            args=[{"visible": all_visible}]))
+
+        # Buttons to show one path at a time
+        for i in range(num_paths):
+            visibility = [True] + ([False] * num_paths) # Vessel structure is always visible (at index 0)
+            visibility[i+1] = True # Show only this path
+            path_name = "Main Path" if i == 0 else f"Alternative {i}"
+            buttons.append(dict(label=f"Show {path_name}",
+                                method="update",
+                                args=[{"visible": visibility}]))
+
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="down",
+                    buttons=buttons,
+                    pad={"r": 10, "t": 10},
+                    showactive=True,
+                    x=0.1,
+                    xanchor="left",
+                    y=1.1,
+                    yanchor="top"
+                ),
+            ]
+        )
+
 
         # Invert Y-axis because image coordinates (0,0) are top-left
         fig.update_scenes(yaxis_autorange="reversed")
@@ -1774,21 +1810,43 @@ class VesselTracerApp(QMainWindow):
         exploration_img = path_base_image.copy()
         self.final_paths = []
         self.alternative_paths = []
-        end_node = mask_pixels[-1]
 
-        # --- Find up to 3 distinct end-to-end paths ---
+        # Find paths that go through all waypoints sequentially.
         paths_found = []
-        current_cost_map = pathfinding_costmap.copy()
         path_blocking_cost = 1e7
-        for _ in range(3):
-            path = self.find_path_astar(current_cost_map, start_node, end_node, combined_identity_map,
-                                      width_map, main_vessel_width, viz_callback=None)
-            if path:
-                paths_found.append(path)
-                for y, x in path:
-                    if 0 <= y < current_cost_map.shape[0] and 0 <= x < current_cost_map.shape[1]:
-                        current_cost_map[y, x] += path_blocking_cost
+
+        # Create a copy of the costmap that will be progressively blocked
+        master_blocked_cost_map = pathfinding_costmap.copy()
+
+        for _ in range(3): # Try to find up to 3 alternative full paths
+            full_path = []
+            possible = True
+            # Use the progressively blocked map for each attempt
+            current_cost_map_for_this_path = master_blocked_cost_map.copy()
+
+            for i in range(len(mask_pixels) - 1):
+                start_node_seg = mask_pixels[i]
+                end_node_seg = mask_pixels[i+1]
+
+                # Find a segment on the progressively blocked map
+                segment = self.find_path_astar(current_cost_map_for_this_path, start_node_seg, end_node_seg, combined_identity_map,
+                                               width_map, main_vessel_width, viz_callback=None)
+
+                if segment:
+                    # Add the segment to the full path for this attempt
+                    full_path.extend(segment if i == 0 else segment[1:])
+                else:
+                    possible = False
+                    break # Stop trying to build this path if a segment fails
+
+            if possible and full_path:
+                paths_found.append(full_path)
+                # Add the successful path to the master blocked map to find different alternatives next time
+                for y, x in full_path:
+                    if 0 <= y < master_blocked_cost_map.shape[0] and 0 <= x < master_blocked_cost_map.shape[1]:
+                        master_blocked_cost_map[y, x] += path_blocking_cost
             else:
+                # If we can't even find one full path, or can't find any more, stop.
                 break
 
         if paths_found:
