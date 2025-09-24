@@ -829,7 +829,7 @@ class PlotlyViewerDialog(QDialog):
     """A dialog for displaying an interactive Plotly graph."""
     def __init__(self, html_content: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Interactive 3D View")
+        self.setWindowTitle("YC 互動式3D視圖")
         self.setMinimumSize(900, 700)
 
         self.layout = QVBoxLayout(self)
@@ -908,6 +908,7 @@ class VesselTracerApp(QMainWindow):
     TIME_COST_WEIGHT = 1.0
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0
+    DYNAMIC_COST_WEIGHT = 5.0  # New parameter to weigh the dynamic cost adjustment
     CROSS_VESSEL_PENALTY = 1e6
     MAIN_VESSEL_WIDTH_TOLERANCE = 0.30  # 30% tolerance for a vessel to be considered "main"
     SIDE_BRANCH_TURN_PENALTY_MULTIPLIER = 10.0  # Make turns in side branches more costly
@@ -915,7 +916,7 @@ class VesselTracerApp(QMainWindow):
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
         super().__init__()
-        self.setWindowTitle("YC血管追蹤2D")
+        self.setWindowTitle("YC_血管尋路")
         self.setGeometry(100, 100, 1280, 960)
         self.set_stylesheet()
 
@@ -1122,7 +1123,7 @@ class VesselTracerApp(QMainWindow):
 
         fig = go.Figure(data=plot_traces)
         fig.update_layout(
-            title_text='3D Vessel Reconstruction',
+            title_text='YC 3D 血管尋路',
             scene=dict(
                 xaxis_title='X (pixels)',
                 yaxis_title='Y (pixels)',
@@ -2077,9 +2078,11 @@ class VesselTracerApp(QMainWindow):
                                 # Side branches cannot have intersections. Forbid the move.
                                 cross_vessel_penalty = self.PATHFINDING_OBSTACLE_COST
 
-                    # 2. Turn Penalty
+                    # 2. Turn Penalty & Dynamic Cost Adjustment
                     turn_penalty = 0
                     parent = came_from.get(current)
+                    cosine_similarity = 1.0  # Assume straight path if no parent
+
                     if parent:
                         v1 = (current[0] - parent[0], current[1] - parent[1])
                         v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
@@ -2087,16 +2090,25 @@ class VesselTracerApp(QMainWindow):
                         mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
                         mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
                         if mag1 > 0 and mag2 > 0:
-                            cosine_similarity = dot_product / (mag1 * mag2)
-                            base_turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
-                            if not is_on_main_vessel:
-                                # Apply a much higher penalty for turning in a side branch.
-                                turn_penalty = base_turn_penalty * self.SIDE_BRANCH_TURN_PENALTY_MULTIPLIER
-                            else:
-                                turn_penalty = base_turn_penalty
+                            # Clamp to avoid floating point inaccuracies > 1.0
+                            cosine_similarity = min(1.0, max(-1.0, dot_product / (mag1 * mag2)))
 
-                    move_cost = np.sqrt(dr ** 2 + dc ** 2)
-                    time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
+                    # Standard turn penalty
+                    base_turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
+                    if not is_on_main_vessel:
+                        # Apply a much higher penalty for turning in a side branch.
+                        turn_penalty = base_turn_penalty * self.SIDE_BRANCH_TURN_PENALTY_MULTIPLIER
+                    else:
+                        turn_penalty = base_turn_penalty
+
+                    # --- NEW: Dynamic adjustment of move and time cost based on smoothness ---
+                    # A bigger turn (lower cosine_similarity) makes the multiplier larger, increasing cost.
+                    dynamic_cost_multiplier = 1.0 + self.DYNAMIC_COST_WEIGHT * (1.0 - cosine_similarity)
+
+                    move_cost = (np.sqrt(dr ** 2 + dc ** 2)) * dynamic_cost_multiplier
+                    time_cost = (self.TIME_COST_WEIGHT * cost_map[neighbor]) * dynamic_cost_multiplier
+                    # --- End of new adjustment ---
+
                     new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
 
                     if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
