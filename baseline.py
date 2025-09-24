@@ -909,6 +909,7 @@ class VesselTracerApp(QMainWindow):
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0
     DYNAMIC_COST_WEIGHT = 5.0  # New parameter to weigh the dynamic cost adjustment
+    STRAIGHT_PATH_THRESHOLD = 0.9  # Cosine similarity threshold to be considered 'straight'
     CROSS_VESSEL_PENALTY = 1e6
     MAIN_VESSEL_WIDTH_TOLERANCE = 0.30  # 30% tolerance for a vessel to be considered "main"
     SIDE_BRANCH_TURN_PENALTY_MULTIPLIER = 10.0  # Make turns in side branches more costly
@@ -2051,71 +2052,89 @@ class VesselTracerApp(QMainWindow):
             if viz_callback and node_counter % viz_interval == 0:
                 viz_callback(list(closed_set))
 
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    if dr == 0 and dc == 0: continue
-                    neighbor = (current[0] + dr, current[1] + dc)
+            parent = came_from.get(current)
 
-                    if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]) or \
-                            cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or \
-                            neighbor in closed_set:
-                        continue
+            # --- Pre-computation to enforce "straight-only" rule ---
+            neighbor_data = []
+            has_straight_path = False
+            if parent: # We can only determine straightness if there's a direction of travel
+                for dr_check in [-1, 0, 1]:
+                    for dc_check in [-1, 0, 1]:
+                        if dr_check == 0 and dc_check == 0: continue
+                        neighbor_check = (current[0] + dr_check, current[1] + dc_check)
 
-                    # --- Dynamic Penalties based on Vessel Type (Main vs. Side) ---
-                    neighbor_width = 2 * width_map[neighbor]
-                    is_on_main_vessel = abs(neighbor_width - main_vessel_width) <= (main_vessel_width * self.MAIN_VESSEL_WIDTH_TOLERANCE)
+                        if not (0 <= neighbor_check[0] < cost_map.shape[0] and 0 <= neighbor_check[1] < cost_map.shape[1]) or \
+                           cost_map[neighbor_check] >= self.PATHFINDING_OBSTACLE_COST or neighbor_check in closed_set:
+                            continue
 
-                    # 1. Vessel Crossing Penalty
-                    cross_vessel_penalty = 0
-                    if identity_map is not None:
-                        current_id = identity_map[current]
-                        neighbor_id = identity_map[neighbor]
-                        if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
-                            if is_on_main_vessel:
-                                # Main vessels can have intersections, but still penalize them.
-                                cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
-                            else:
-                                # Side branches cannot have intersections. Forbid the move.
-                                cross_vessel_penalty = self.PATHFINDING_OBSTACLE_COST
-
-                    # 2. Turn Penalty & Dynamic Cost Adjustment
-                    turn_penalty = 0
-                    parent = came_from.get(current)
-                    cosine_similarity = 1.0  # Assume straight path if no parent
-
-                    if parent:
                         v1 = (current[0] - parent[0], current[1] - parent[1])
-                        v2 = (neighbor[0] - current[0], neighbor[1] - current[1])
+                        v2 = (neighbor_check[0] - current[0], neighbor_check[1] - current[1])
                         dot_product = v1[0] * v2[0] + v1[1] * v2[1]
                         mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
                         mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
+
+                        cosine_similarity = 0
                         if mag1 > 0 and mag2 > 0:
-                            # Clamp to avoid floating point inaccuracies > 1.0
                             cosine_similarity = min(1.0, max(-1.0, dot_product / (mag1 * mag2)))
 
-                    # Standard turn penalty
-                    base_turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
-                    if not is_on_main_vessel:
-                        # Apply a much higher penalty for turning in a side branch.
-                        turn_penalty = base_turn_penalty * self.SIDE_BRANCH_TURN_PENALTY_MULTIPLIER
-                    else:
-                        turn_penalty = base_turn_penalty
+                        neighbor_data.append({'pos': neighbor_check, 'sim': cosine_similarity, 'dr': dr_check, 'dc': dc_check})
+                        if cosine_similarity > self.STRAIGHT_PATH_THRESHOLD:
+                            has_straight_path = True
 
-                    # --- NEW: Dynamic adjustment of move and time cost based on smoothness ---
-                    # A bigger turn (lower cosine_similarity) makes the multiplier larger, increasing cost.
-                    dynamic_cost_multiplier = 1.0 + self.DYNAMIC_COST_WEIGHT * (1.0 - cosine_similarity)
+            # --- Main neighbor processing loop ---
+            # If we didn't pre-compute neighbors (i.e., we are at the start node), generate them now.
+            if not parent:
+                for dr in [-1, 0, 1]:
+                    for dc in [-1, 0, 1]:
+                        if dr == 0 and dc == 0: continue
+                        neighbor = (current[0] + dr, current[1] + dc)
+                        if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]) or \
+                           cost_map[neighbor] >= self.PATHFINDING_OBSTACLE_COST or neighbor in closed_set:
+                            continue
+                        neighbor_data.append({'pos': neighbor, 'sim': 1.0, 'dr': dr, 'dc': dc}) # Assume 1.0 sim for start
 
-                    move_cost = (np.sqrt(dr ** 2 + dc ** 2)) * dynamic_cost_multiplier
-                    time_cost = (self.TIME_COST_WEIGHT * cost_map[neighbor]) * dynamic_cost_multiplier
-                    # --- End of new adjustment ---
+            for data in neighbor_data:
+                neighbor = data['pos']
+                cosine_similarity = data['sim']
+                dr, dc = data['dr'], data['dc']
 
-                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+                # NEW RULE: If a straight path exists, forbid turns.
+                if has_straight_path and cosine_similarity < self.STRAIGHT_PATH_THRESHOLD:
+                    continue
 
-                    if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
-                        g_costs[neighbor] = new_g_cost
-                        f_cost = new_g_cost
-                        heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
-                        came_from[neighbor] = current
+                # --- Dynamic Penalties based on Vessel Type (Main vs. Side) ---
+                neighbor_width = 2 * width_map[neighbor]
+                is_on_main_vessel = abs(neighbor_width - main_vessel_width) <= (main_vessel_width * self.MAIN_VESSEL_WIDTH_TOLERANCE)
+
+                # 1. Vessel Crossing Penalty
+                cross_vessel_penalty = 0
+                if identity_map is not None:
+                    current_id = identity_map[current]
+                    neighbor_id = identity_map[neighbor]
+                    if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
+                        if is_on_main_vessel:
+                            cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
+                        else:
+                            cross_vessel_penalty = self.PATHFINDING_OBSTACLE_COST
+
+                # 2. Turn Penalty & Dynamic Cost Adjustment
+                base_turn_penalty = self.TURN_PENALTY_WEIGHT * (1.0 - cosine_similarity)
+                if not is_on_main_vessel:
+                    turn_penalty = base_turn_penalty * self.SIDE_BRANCH_TURN_PENALTY_MULTIPLIER
+                else:
+                    turn_penalty = base_turn_penalty
+
+                dynamic_cost_multiplier = 1.0 + self.DYNAMIC_COST_WEIGHT * (1.0 - cosine_similarity)
+                move_cost = (np.sqrt(dr ** 2 + dc ** 2)) * dynamic_cost_multiplier
+                time_cost = (self.TIME_COST_WEIGHT * cost_map[neighbor]) * dynamic_cost_multiplier
+
+                new_g_cost = g_costs.get(current, float('inf')) + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+
+                if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
+                    g_costs[neighbor] = new_g_cost
+                    f_cost = new_g_cost
+                    heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
+                    came_from[neighbor] = current
 
         return None
 
