@@ -85,7 +85,7 @@ class YC_ImageLabel(QLabel):
                 self.update()
 
     def mouseMoveEvent(self, event):
-        if self.is_panning:
+        if self.is_panning and self.current_pixmap:
             delta = event.pos() - self.last_pan_pos
             self.pan_offset += delta
             self.last_pan_pos = event.pos()
@@ -95,6 +95,8 @@ class YC_ImageLabel(QLabel):
             if end_pos and self.current_drawing_roi:
                 self.current_drawing_roi.setBottomRight(end_pos)
                 self.update()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton and self.is_panning:

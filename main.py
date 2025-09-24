@@ -27,43 +27,51 @@ def main():
 
     sys.excepthook = exception_hook
 
-    try:
-        app = QApplication(sys.argv)
+    app = QApplication(sys.argv)
 
+    try:
+        # Attempt to create and show the language selection dialog first
         lang_dialog = YC_LanguageSelectionDialog()
         if lang_dialog.exec() == QDialog.DialogCode.Accepted:
             language = lang_dialog.get_selected_language()
         else:
-            language = "en"
+            # Exit if the user closes the language dialog
+            sys.exit(0)
 
         main_window = YC_VesselTracerApp(language=language)
         main_window.show()
         sys.exit(app.exec())
+
     except ImportError as e:
-        app = QApplication([])
+        # This handles missing critical libraries like PyQt6
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Icon.Critical)
         msg_box.setText(f"Missing Required Python Library: {e.name}")
         msg_box.setInformativeText(
-            "Please ensure all required libraries are installed. You can typically install them using:\n"
-            "'pip install -r requirements.txt'"
+            "A required library is missing. Please install all dependencies to run the application.\n"
+            "You can typically install them using the following command in your terminal:\n\n"
+            "pip install -r requirements.txt"
         )
         msg_box.setWindowTitle("Dependency Error")
         msg_box.exec()
         sys.exit(1)
+
     except Exception as e:
+        # This is a catch-all for other potential errors during initialization
         print(f"Fatal error during application startup: {e}")
-        app = QApplication.instance() or QApplication([])
+        import traceback
+        traceback.print_exc()
+
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Icon.Critical)
         msg_box.setWindowTitle("Fatal Startup Error")
-        msg_box.setText("The application failed to start because a Qt platform plugin could not be initialized.")
+        msg_box.setText("The application failed to start due to an unexpected error.")
         msg_box.setInformativeText(
-            f"This is often due to a system configuration issue or a conflict between libraries.\n\n"
-            "Potential solutions:\n"
-            "1. Ensure you are using 'opencv-python-headless' instead of 'opencv-python'.\n"
-            "2. On Linux, try installing required system libraries like 'libxcb-cursor0'.\n\n"
-            f"Original Error: {e}"
+            "A critical error occurred that prevented the application from launching. "
+            "This could be due to a variety of reasons, such as a corrupted installation, "
+            "a conflict with system libraries, or a bug in the application.\n\n"
+            "Please check the console output for a detailed error message (traceback).\n\n"
+            f"Error details: {e}"
         )
         msg_box.exec()
         sys.exit(1)
