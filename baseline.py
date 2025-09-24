@@ -1774,26 +1774,43 @@ class VesselTracerApp(QMainWindow):
         exploration_img = path_base_image.copy()
         self.final_paths = []
         self.alternative_paths = []
-        end_node = mask_pixels[-1]
 
-        # --- Find up to 3 distinct end-to-end paths ---
-        paths_found = []
-        current_cost_map = pathfinding_costmap.copy()
-        path_blocking_cost = 1e7
-        for _ in range(3):
-            path = self.find_path_astar(current_cost_map, start_node, end_node, combined_identity_map,
-                                      width_map, main_vessel_width, viz_callback=None)
-            if path:
-                paths_found.append(path)
-                for y, x in path:
-                    if 0 <= y < current_cost_map.shape[0] and 0 <= x < current_cost_map.shape[1]:
-                        current_cost_map[y, x] += path_blocking_cost
+        all_found_paths = []
+        # The cost map that will be penalized after each full path is found
+        cumulative_cost_map = pathfinding_costmap.copy()
+        path_blocking_penalty = 1e7
+
+        for _ in range(3):  # Find up to 3 paths
+            full_path = []
+            is_path_complete = True
+            for i in range(len(mask_pixels) - 1):
+                segment_start_node = mask_pixels[i]
+                segment_end_node = mask_pixels[i + 1]
+
+                # Use the cumulative cost map for each segment search
+                segment = self.find_path_astar(cumulative_cost_map, segment_start_node, segment_end_node, combined_identity_map,
+                                               width_map, main_vessel_width, viz_callback=None)
+
+                if segment:
+                    # Extend the full path, avoiding duplicate points between segments
+                    full_path.extend(segment if i == 0 else segment[1:])
+                else:
+                    is_path_complete = False
+                    break  # This full path attempt has failed
+
+            if is_path_complete and full_path:
+                all_found_paths.append(full_path)
+                # Penalize the path found in this iteration so the next iteration finds a different one
+                for y, x in full_path:
+                    if 0 <= y < cumulative_cost_map.shape[0] and 0 <= x < cumulative_cost_map.shape[1]:
+                        cumulative_cost_map[y, x] += path_blocking_penalty
             else:
+                # If we couldn't find a path, stop trying
                 break
 
-        if paths_found:
-            self.final_paths = [paths_found[0]]
-            self.alternative_paths = paths_found[1:]
+        if all_found_paths:
+            self.final_paths = [all_found_paths[0]]
+            self.alternative_paths = all_found_paths[1:]
         else:
             self.final_paths, self.alternative_paths = [], []
 
@@ -1946,11 +1963,19 @@ class VesselTracerApp(QMainWindow):
 
         traces = [vessel_trace]
 
-        # --- 2. Prepare data for the main path ---
-        if self.final_paths and self.final_paths[0]:
-            main_path = self.final_paths[0]
+        # --- 2. Combine all paths and define colors ---
+        all_paths = (self.final_paths or []) + (self.alternative_paths or [])
+        path_colors = ['lime', 'red', 'blue', 'orange', 'purple', 'yellow']
+
+        if not all_paths:
+            return traces
+
+        # --- 3. Prepare data for each path ---
+        for i, path in enumerate(all_paths):
+            if not path: continue
+
             path_x, path_y, path_z = [], [], []
-            for y_coord, x_coord in main_path:
+            for y_coord, x_coord in path:
                 path_x.append(x_coord)
                 path_y.append(y_coord)
                 if self.temporal_cost_map is not None and 0 <= y_coord < self.temporal_cost_map.shape[0] and 0 <= x_coord < self.temporal_cost_map.shape[1]:
@@ -1958,34 +1983,20 @@ class VesselTracerApp(QMainWindow):
                 else:
                     path_z.append(0) # Fallback
 
-            main_trace = go.Scatter3d(
+            path_name = f"Path {i+1}"
+            if i == 0:
+                path_name = "Main Path"
+
+            path_trace = go.Scatter3d(
                 x=path_x, y=path_y, z=path_z,
                 mode='lines',
-                line=dict(color='lime', width=8),
-                name='Main Path'
+                line=dict(
+                    color=path_colors[i % len(path_colors)], # Cycle through colors
+                    width=8
+                ),
+                name=path_name
             )
-            traces.append(main_trace)
-
-        # --- 3. Prepare data for alternative paths ---
-        if self.alternative_paths:
-            for i, alt_path in enumerate(self.alternative_paths):
-                if not alt_path: continue
-                path_x, path_y, path_z = [], [], []
-                for y_coord, x_coord in alt_path:
-                    path_x.append(x_coord)
-                    path_y.append(y_coord)
-                    if self.temporal_cost_map is not None and 0 <= y_coord < self.temporal_cost_map.shape[0] and 0 <= x_coord < self.temporal_cost_map.shape[1]:
-                        path_z.append(self.temporal_cost_map[y_coord, x_coord])
-                    else:
-                        path_z.append(0) # Fallback
-
-                alt_trace = go.Scatter3d(
-                    x=path_x, y=path_y, z=path_z,
-                    mode='lines',
-                    line=dict(color='cyan', width=4, dash='dot'),
-                    name=f'Alternative {i+1}'
-                )
-                traces.append(alt_trace)
+            traces.append(path_trace)
 
         return traces
 
