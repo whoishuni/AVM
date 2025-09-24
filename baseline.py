@@ -90,16 +90,77 @@ def get_most_frequent_color(image: np.ndarray) -> int:
     return unique[np.argmax(counts)]
 
 
-def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
-    """Intelligently connects separated vessel segments in a binary mask.
+def _local_astar_search(cost_map: np.ndarray, start: Tuple[int, int], end: Tuple[int, int], obstacle_threshold: float) -> Optional[List[Tuple[int, int]]]:
+    """
+    A simplified A* search for finding paths in local, intensity-based cost maps.
+
+    Args:
+        cost_map: A 2D NumPy array where higher values are higher cost.
+        start: The (y, x) starting coordinate tuple.
+        end: The (y, x) ending coordinate tuple.
+        obstacle_threshold: A value in the cost_map above which a pixel is considered an impassable obstacle.
+
+    Returns:
+        A list of (y, x) tuples representing the path from start to end, or None if no path is found.
+    """
+    if cost_map[start] >= obstacle_threshold or cost_map[end] >= obstacle_threshold:
+        return None
+
+    def heuristic(p1, p2):
+        return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+    open_set = [(heuristic(start, end), 0, start)]  # (f_cost, g_cost, pos)
+    came_from = {}
+    g_costs = {start: 0}
+
+    while open_set:
+        _, g_cost, current = heapq.heappop(open_set)
+
+        if current == end:
+            path = []
+            while current in came_from:
+                path.append(current)
+                current = came_from[current]
+            path.append(start)
+            path.reverse()
+            return path
+
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0:
+                    continue
+
+                neighbor = (current[0] + dr, current[1] + dc)
+
+                if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]):
+                    continue
+
+                if cost_map[neighbor] >= obstacle_threshold:
+                    continue
+
+                move_cost = np.sqrt(dr**2 + dc**2)
+                new_g_cost = g_costs[current] + move_cost + cost_map[neighbor]
+
+                if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
+                    g_costs[neighbor] = new_g_cost
+                    f_cost = new_g_cost + heuristic(neighbor, end)
+                    heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
+                    came_from[neighbor] = current
+
+    return None
+
+
+def bridge_gaps_in_mask(mask: np.ndarray, enhancement_map: np.ndarray, max_distance: int = 15) -> np.ndarray:
+    """Intelligently connects separated vessel segments in a binary mask by performing
+    a local A* search on an enhancement map to validate the connection.
 
     This method is more accurate than simple dilation. It skeletonizes the mask,
-    finds endpoints of the skeleton lines, and connects the closest pair of
-    endpoints that belong to different contours, provided they are within
-    `max_distance`.
+    finds endpoints of the skeleton lines, and for each pair of close endpoints,
+    it searches for a path of bright pixels on the `enhancement_map` to bridge the gap.
 
     Args:
         mask: The binary (0 or 255) vessel mask as a NumPy array.
+        enhancement_map: The grayscale map (e.g. from Frangi filter) where bright pixels indicate vessels.
         max_distance: The maximum pixel distance to bridge between two endpoints.
 
     Returns:
@@ -158,9 +219,37 @@ def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
                 dist = np.linalg.norm(np.array(p1_yx) - np.array(p2_yx))
 
                 if dist < max_distance:
-                    p1_xy = (int(p1_yx[1]), int(p1_yx[0]))
-                    p2_xy = (int(p2_yx[1]), int(p2_yx[0]))
-                    cv2.line(bridged_mask, p1_xy, p2_xy, 255, 1)
+                    # Instead of drawing a direct line, we validate the path with a local A* search
+                    # on the enhancement map.
+
+                    # 1. Define ROI around the two endpoints
+                    buffer = 10 # pixels
+                    h, w = mask.shape
+                    roi_x_min = max(0, min(p1_yx[1], p2_yx[1]) - buffer)
+                    roi_x_max = min(w, max(p1_yx[1], p2_yx[1]) + buffer)
+                    roi_y_min = max(0, min(p1_yx[0], p2_yx[0]) - buffer)
+                    roi_y_max = min(h, max(p1_yx[0], p2_yx[0]) + buffer)
+
+                    local_enhancement_map = enhancement_map[roi_y_min:roi_y_max, roi_x_min:roi_x_max]
+
+                    # 2. Create local cost map (lower cost for brighter pixels)
+                    local_cost_map = 255.0 - local_enhancement_map.astype(np.float32)
+
+                    # 3. Run local A* search
+                    local_start = (p1_yx[0] - roi_y_min, p1_yx[1] - roi_x_min)
+                    local_end = (p2_yx[0] - roi_y_min, p2_yx[1] - roi_x_min)
+
+                    # Obstacle threshold: treat very dark pixels in the enhancement map as walls.
+                    # A value of 30 means pixels with brightness < (255-225) are obstacles.
+                    path = _local_astar_search(local_cost_map, local_start, local_end, obstacle_threshold=225)
+
+                    # 4. If a path is found, draw it on the mask
+                    if path:
+                        for point_y, point_x in path:
+                            global_y = point_y + roi_y_min
+                            global_x = point_x + roi_x_min
+                            if 0 <= global_y < h and 0 <= global_x < w:
+                                bridged_mask[global_y, global_x] = 255
 
     return bridged_mask
 
@@ -257,7 +346,7 @@ def create_enhanced_vessel_masks(images: List[np.ndarray], noise_rois: List[QRec
         _, binary_mask = cv2.threshold(normalized_response, 30, 255, cv2.THRESH_BINARY)
         # --- End of new pipeline ---
 
-        bridged_mask = bridge_gaps_in_mask(binary_mask, max_gap_dist)
+        bridged_mask = bridge_gaps_in_mask(binary_mask, normalized_response, max_gap_dist)
         masks.append(bridged_mask)
 
         if worker_thread:
@@ -433,6 +522,7 @@ class AppState(Enum):
     MARKING_PATH = auto()     # User is actively marking points on the image.
     RANGE_CONFIRMED = auto()  # User has confirmed points, ready for configuration or analysis.
     PROCESSING = auto()       # Application is busy with a background task (e.g., mask generation).
+    AWAITING_BRANCH_SELECTION = auto() # Analysis paused, waiting for user to select a branch.
     DONE = auto()             # Analysis is complete and results are shown.
 
 
@@ -884,6 +974,8 @@ class VesselTracerApp(QMainWindow):
         self.active_thread: Optional[QThread] = None
         self.final_paths: Optional[List[List[Tuple[int, int]]]] = None
         self.alternative_paths: Optional[List[List[Tuple[int, int]]]] = None
+        self.committed_path: Optional[List[Tuple[int, int]]] = None
+        self.candidate_branches: Optional[List[List[Tuple[int, int]]]] = None
         self.final_path_image: Optional[np.ndarray] = None
         self.base_mask_projection: Optional[np.ndarray] = None
         self.temporal_cost_map: Optional[np.ndarray] = None
@@ -1132,6 +1224,11 @@ class VesselTracerApp(QMainWindow):
                 "info_text": "Running analysis, please wait...", "status_text": "Processing...",
                 "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False
             },
+            AppState.AWAITING_BRANCH_SELECTION: {
+                "main_action_text": "Select a Branch", "main_action_enabled": False,
+                "info_text": "Click on a colored branch to continue the path.", "status_text": "Waiting for user input...",
+                "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False
+            },
             AppState.DONE: {
                 "main_action_text": "Analysis Complete", "main_action_enabled": False,
                 "info_text": "Path analysis is complete! Reset to start a new analysis.",
@@ -1276,6 +1373,21 @@ class VesselTracerApp(QMainWindow):
         display_img_bgr = cv2.cvtColor(base_image_gray, cv2.COLOR_GRAY2BGR)
         display_img_bgr = self.draw_path_points_on_image(display_img_bgr, frame_index, detailed_color=True)
 
+        # Draw committed path
+        if self.committed_path:
+            path_yx = np.array(self.committed_path, dtype=np.int32).reshape(-1, 1, 2)
+            path_xy = path_yx[:, :, ::-1]
+            cv2.polylines(display_img_bgr, [path_xy], isClosed=False, color=(50, 255, 50), thickness=3) # Green
+
+        # Draw candidate branches
+        if self.app_state == AppState.AWAITING_BRANCH_SELECTION and self.candidate_branches:
+            branch_colors = [(255, 255, 0), (255, 0, 255), (0, 255, 255)] # Yellow, Magenta, Cyan
+            for i, branch in enumerate(self.candidate_branches):
+                color = branch_colors[i % len(branch_colors)]
+                path_yx = np.array(branch, dtype=np.int32).reshape(-1, 1, 2)
+                path_xy = path_yx[:, :, ::-1]
+                cv2.polylines(display_img_bgr, [path_xy], isClosed=False, color=color, thickness=3)
+
         for r in self.noise_rois:
             cv2.rectangle(display_img_bgr, (r.x(), r.y()), (r.x() + r.width(), r.y() + r.height()), (0, 0, 255), 2)
 
@@ -1311,6 +1423,34 @@ class VesselTracerApp(QMainWindow):
             self.path_points_info.sort(key=lambda p: p['frame'])
             self.update_frame_display(self.current_frame_index)
             self.update_ui_for_state()
+        elif self.app_state == AppState.AWAITING_BRANCH_SELECTION:
+            if not self.candidate_branches: return
+
+            click_point = np.array([point.y(), point.x()])
+            min_dist = float('inf')
+            best_branch_idx = -1
+
+            # Find the branch closest to the user's click
+            for i, branch in enumerate(self.candidate_branches):
+                branch_points = np.array(branch)
+                distances = np.linalg.norm(branch_points - click_point, axis=1)
+                if np.min(distances) < min_dist:
+                    min_dist = np.min(distances)
+                    best_branch_idx = i
+
+            # If a reasonably close branch was clicked
+            if best_branch_idx != -1 and min_dist < 30: # 30px tolerance
+                selected_branch = self.candidate_branches[best_branch_idx]
+                self.committed_path.extend(selected_branch)
+
+                new_start_node = selected_branch[-1]
+
+                # Clear candidates and continue the search
+                self.candidate_branches = []
+                self.app_state = AppState.PROCESSING # Go to processing state while it finds the next segment
+                self.update_ui_for_state()
+                self._advance_interactive_path(new_start_node)
+
 
     def _get_frame_range(self, for_processing: bool = False) -> Optional[Tuple[int, int]]:
         """Gets the frame range defined by the earliest and latest marked points.
@@ -1516,21 +1656,44 @@ class VesselTracerApp(QMainWindow):
         return steps
 
     def show_step_viewer(self):
-        """Shows the step-by-step processing viewer dialog."""
-        if self.app_state not in [AppState.RANGE_CONFIRMED, AppState.DONE]: return
+        """Prepares and shows the final step-by-step analysis results dialog."""
         self.statusBar().showMessage("Preparing step viewer...", 5000)
         QApplication.processEvents()
 
-        # For preview, we use the user-selected range, which is more intuitive
+        steps = []
+        # For visualization, we use the user-selected range, which is more intuitive
         frame_range = self._get_frame_range(for_processing=False)
         if not frame_range: return
         start_f, end_f = frame_range
-        image_to_process = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+        base_original_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
 
-        step_data = self.generate_mask_steps(image_to_process, self.smoothing_level)
+        # 1. Mask Generation Steps
+        mask_steps_data = self.generate_mask_steps(base_original_pip, self.smoothing_level)
+        for img, desc in mask_steps_data:
+            steps.append((self.convert_np_to_pixmap(img), f"Mask Generation - {desc}"))
 
-        qt_steps = [(self.convert_np_to_pixmap(img), desc) for img, desc in step_data]
-        dialog = StepViewerDialog(qt_steps, self)
+        # 2. Add other visualizations if they exist
+        if self.base_mask_projection is not None:
+             # Added: Vessel Layering Step
+            layered_vessel_mask = create_vessel_layers(self.base_mask_projection, base_original_pip)
+            if layered_vessel_mask is not None:
+                normalized_layers = cv2.normalize(layered_vessel_mask, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                layer_heatmap = cv2.applyColorMap(normalized_layers, cv2.COLORMAP_JET)
+                layer_heatmap[layered_vessel_mask == 0] = [0, 0, 0]
+                steps.append((self.convert_np_to_pixmap(layer_heatmap), "Vessel Layering (Bright=Top, Dark=Bottom)"))
+
+            # Vessel Identity Map Visualization
+            if self.vessel_identity_map is not None and np.max(self.vessel_identity_map) > 0:
+                norm_ids = cv2.normalize(self.vessel_identity_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                identity_heatmap = cv2.applyColorMap(norm_ids, cv2.COLORMAP_JET)
+                identity_heatmap[self.vessel_identity_map == 0] = [0, 0, 0]
+                steps.append((self.convert_np_to_pixmap(identity_heatmap), "Vessel Identity Map (Memory)"))
+
+        # 3. Add final result image if analysis is complete
+        if self.app_state == AppState.DONE and self.final_path_image is not None:
+            steps.append((self.convert_np_to_pixmap(self.final_path_image), "Final Result"))
+
+        dialog = StepViewerDialog(steps, self)
         dialog.exec_()
         self.statusBar().showMessage("Ready")
 
@@ -1594,7 +1757,121 @@ class VesselTracerApp(QMainWindow):
         pathfinding_costmap[final_mask > 0] = 0  # Base cost is 0
         pathfinding_costmap += cost_map  # Add time cost
 
-        self.show_full_analysis_steps(final_mask, mask_pixels, pathfinding_costmap)
+        # --- Initialize interactive pathfinding ---
+        self.committed_path = []
+        self.candidate_branches = []
+        self.path_points_info[0]['snapped_pixel'] = mask_pixels[0]
+        self.path_points_info[-1]['snapped_pixel'] = mask_pixels[-1]
+
+        # Store the costmap for reuse in subsequent steps
+        self.pathfinding_costmap = pathfinding_costmap
+
+        self._advance_interactive_path(mask_pixels[0])
+
+
+    def _advance_interactive_path(self, start_node: Tuple[int, int]):
+        """
+        Performs one step of the interactive pathfinding process.
+        Finds the path from the start_node to the next branch or the end.
+        """
+        self.statusBar().showMessage("Finding next path segment...")
+        QApplication.processEvents()
+
+        destination_node = self.path_points_info[-1]['snapped_pixel']
+
+        # Find the single best path from the current start to the absolute end
+        path_to_end = self.find_path_astar(self.pathfinding_costmap, start_node, destination_node, self.vessel_identity_map)
+
+        if not path_to_end:
+            QMessageBox.warning(self, "Pathfinding Failed", "Could not find a path from the current position.")
+            self.app_state = AppState.RANGE_CONFIRMED
+            self.update_ui_for_state()
+            return
+
+        # --- Find the next branch point on this path ---
+        branch_point = None
+        branching_vessel_ids = set()
+
+        for i, p in enumerate(path_to_end):
+            p_id = self.vessel_identity_map[p]
+            # Check 8 neighbors for different vessel IDs
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0: continue
+                    neighbor = (p[0] + dr, p[1] + dc)
+                    if 0 <= neighbor[0] < self.vessel_identity_map.shape[0] and 0 <= neighbor[1] < self.vessel_identity_map.shape[1]:
+                        n_id = self.vessel_identity_map[neighbor]
+                        if n_id != 0 and n_id != p_id:
+                            # This is a branch. Does it lead to the destination?
+                            branch_path = self.find_path_astar(self.pathfinding_costmap, neighbor, destination_node, self.vessel_identity_map)
+                            if branch_path:
+                                branch_point = p
+                                branching_vessel_ids.add(n_id)
+            if branch_point:
+                break # Found the first branch point, stop searching
+
+        # --- Handle the outcome ---
+        if branch_point is None:
+            # NO BRANCH FOUND: This is the final segment
+            self.committed_path.extend(path_to_end)
+            self.final_paths = [self.committed_path]
+            self.alternative_paths = []
+            self._finalize_analysis()
+        else:
+            # BRANCH FOUND: Pause for user input
+            path_to_branch = path_to_end[:path_to_end.index(branch_point) + 1]
+            self.committed_path.extend(path_to_branch)
+
+            # BRANCH FOUND: Pause for user input
+            path_to_branch = path_to_end[:path_to_end.index(branch_point) + 1]
+            self.committed_path.extend(path_to_branch)
+
+            # --- Generate short candidate branches for selection ---
+            self.candidate_branches = []
+            branch_length = 30 # pixels
+
+            # Find all unique vessel IDs at the branch point, including the original path's continuation
+            continuation_id = self.vessel_identity_map[path_to_end[path_to_end.index(branch_point)+1]]
+            all_branch_ids = branching_vessel_ids.union({continuation_id})
+
+            for vessel_id in all_branch_ids:
+                # Find a short path segment for this branch
+                # We can use the main A* search but with a very close "fake" destination to guide it
+
+                # Find a point 20px away in the direction of the branch
+                temp_path = self.find_path_astar(self.pathfinding_costmap, branch_point, destination_node, self.vessel_identity_map, force_vessel_id=vessel_id)
+
+                if temp_path and len(temp_path) > 1:
+                    # Take a segment of the defined length
+                    segment = temp_path[:branch_length]
+                    if segment:
+                         # Check for duplicates before adding
+                        is_duplicate = any(np.array_equal(segment, b) for b in self.candidate_branches)
+                        if not is_duplicate:
+                            self.candidate_branches.append(segment)
+
+            self.app_state = AppState.AWAITING_BRANCH_SELECTION
+            self.update_ui_for_state()
+            self.update_frame_display(self.current_frame_index) # Redraw with candidates
+
+    def _finalize_analysis(self):
+        """
+        Called when the interactive path selection is complete.
+        Generates final images and moves to the DONE state.
+        """
+        self.app_state = AppState.DONE
+        self.update_ui_for_state()
+
+        frame_range = self._get_frame_range(for_processing=False)
+        if not frame_range: return
+        start_f, end_f = frame_range
+        base_original_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+
+        self.generate_final_path_image(base_original_pip)
+        self.display_image(self.final_path_image)
+
+        QMessageBox.information(self, "Analysis Complete", "The interactive path selection is complete. You can now view the 3D model or reset.")
+
 
     def replay_path_animation(self, anim_data: dict):
         """Replays the A* pathfinding search animation from the step viewer.
@@ -1642,157 +1919,6 @@ class VesselTracerApp(QMainWindow):
         cv2.polylines(base_image, [path_points], isClosed=False, color=(50, 255, 50), thickness=2)
         self.display_image(base_image)
         self.statusBar().showMessage("Animation replay finished.", 3000)
-
-    def show_full_analysis_steps(self, final_mask, mask_pixels, pathfinding_costmap):
-        """Prepares and shows the final step-by-step analysis results dialog.
-
-        This method assembles all visualization steps, runs the final A*
-        pathfinding, and displays the results in a StepViewerDialog.
-
-        Args:
-            final_mask: The final binary vessel mask.
-            mask_pixels: The list of user-marked points, snapped to the mask.
-            pathfinding_costmap: The cost map for the A* algorithm.
-        """
-        self.statusBar().showMessage("Preparing full analysis steps...", 5000)
-        QApplication.processEvents()
-
-        steps = []
-        # For visualization, we use the user-selected range, which is more intuitive
-        frame_range = self._get_frame_range(for_processing=False)
-        if not frame_range:
-            self.statusBar().showMessage("Error: Could not determine frame range")
-            self.app_state = AppState.RANGE_CONFIRMED
-            self.update_ui_for_state()
-            return
-        start_f, end_f = frame_range
-        base_original_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
-
-        # 1. Mask Generation Steps
-        mask_steps_data = self.generate_mask_steps(base_original_pip, self.smoothing_level)
-        for img, desc in mask_steps_data:
-            steps.append((self.convert_np_to_pixmap(img), f"Mask Generation - {desc}"))
-
-        # Added: Vessel Layering Step
-        self.layered_vessel_mask = create_vessel_layers(final_mask, base_original_pip)
-        if self.layered_vessel_mask is not None:
-            # Normalize to 0-255 for color mapping
-            normalized_layers = cv2.normalize(self.layered_vessel_mask, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-            layer_heatmap = cv2.applyColorMap(normalized_layers, cv2.COLORMAP_JET)
-            layer_heatmap[self.layered_vessel_mask == 0] = [0, 0, 0]  # Set background to black
-            steps.append((self.convert_np_to_pixmap(layer_heatmap), "Vessel Layering (Bright=Top, Dark=Bottom)"))
-
-        # NEW: Vessel Identity Map Visualization
-        if self.vessel_identity_map is not None:
-            max_id = np.max(self.vessel_identity_map)
-            if max_id > 0:
-                # Use a colormap to give each vessel ID a unique color
-                norm_ids = cv2.normalize(self.vessel_identity_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                identity_heatmap = cv2.applyColorMap(norm_ids, cv2.COLORMAP_JET)
-                identity_heatmap[self.vessel_identity_map == 0] = [0, 0, 0]  # Set background to black
-                steps.append((self.convert_np_to_pixmap(identity_heatmap), "Vessel Identity Map (Memory)"))
-
-
-        # 2. Cost Map Heatmap
-        display_costmap = pathfinding_costmap.copy()
-        valid_pixels = display_costmap < self.PATHFINDING_OBSTACLE_COST
-        if np.any(valid_pixels):
-            min_val = np.min(display_costmap[valid_pixels])
-            max_val = np.max(display_costmap[valid_pixels])
-            if max_val > min_val:
-                normalized_map = 255 * (display_costmap - min_val) / (max_val - min_val)
-                normalized_map[~valid_pixels] = 0
-                heatmap = cv2.applyColorMap(normalized_map.astype(np.uint8), cv2.COLORMAP_JET)
-                heatmap[~valid_pixels] = [0, 0, 0]
-                steps.append((self.convert_np_to_pixmap(heatmap), "Temporal Cost Map (Blue = Lower Cost)"))
-
-        # 3. Marked Points and Path Search Animation
-        path_base_image = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
-        for i, p in enumerate(mask_pixels):
-            color = (0, 255, 255)  # Yellow
-            if i == 0:
-                color = (0, 0, 255)  # Red
-            elif i == len(mask_pixels) - 1:
-                color = (255, 100, 0)  # Blue
-            cv2.circle(path_base_image, (p[1], p[0]), 5, color, -1)
-        steps.append((self.convert_np_to_pixmap(path_base_image), "Located Marked Points on Mask"))
-
-        self.statusBar().showMessage("Executing pathfinding...", 5000)
-        QApplication.processEvents()
-
-        exploration_img = path_base_image.copy()
-
-        self.final_paths = []
-        self.alternative_paths = []
-
-        # We now find end-to-end paths, not segments.
-        # So we only need the first and last marked points.
-        start_node = mask_pixels[0]
-        end_node = mask_pixels[-1]
-
-        # --- Find up to 3 distinct end-to-end paths ---
-        paths_found = []
-        current_cost_map = pathfinding_costmap.copy()
-        path_blocking_cost = 1e7
-
-        for _ in range(3): # Find a max of 3 paths
-            path = self.find_path_astar(current_cost_map, start_node, end_node, self.vessel_identity_map, viz_callback=None)
-
-            if path:
-                paths_found.append(path)
-                # Block this path for the next search
-                for y, x in path:
-                    if 0 <= y < current_cost_map.shape[0] and 0 <= x < current_cost_map.shape[1]:
-                        current_cost_map[y, x] += path_blocking_cost
-            else:
-                # No more paths can be found
-                break
-
-        if paths_found:
-            self.final_paths = [paths_found[0]] # The first path is the main one
-            self.alternative_paths = paths_found[1:] # The rest are alternatives
-        else:
-            self.final_paths = []
-            self.alternative_paths = []
-
-        if not self.final_paths:
-            QMessageBox.warning(self, "Pathfinding Failed",
-                                "Could not find a continuous path between all marked points.\n\n"
-                                "<b>Recommended Actions:</b>\n"
-                                "1. <b>Adjust Smoothing</b>: Change this in 'Mark & Configure' to alter mask connectivity.\n"
-                                "2. <b>Use Noise Areas</b>: If there's background interference, use 'Draw Noise Area' to exclude it.\n"
-                                "3. <b>Check Marked Points</b>: Ensure points are within clear vessel structures.")
-
-            path_img = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
-            steps.append((self.convert_np_to_pixmap(path_img), "Pathfinding Failed"))
-            dialog = StepViewerDialog(steps, self)
-            dialog.exec_()
-            self.app_state = AppState.RANGE_CONFIRMED
-            self.update_ui_for_state()
-            self.info_label.setText("Pathfinding failed. Please adjust parameters and try again.")
-            return
-
-        # 4. Display Path Search Result
-        for path in self.final_paths:
-            path_points_yx = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
-            path_points_xy = path_points_yx[:, :, ::-1]
-            cv2.polylines(exploration_img, [path_points_xy], isClosed=False, color=(50, 255, 50), thickness=2)
-
-
-        anim_data = {"type": "animation", "costmap": pathfinding_costmap, "pixels": mask_pixels,
-                     "baseimage": path_base_image, "identity_map": self.vessel_identity_map}
-        steps.append((self.convert_np_to_pixmap(exploration_img), "A* Algorithm Search Result (Click Replay)", anim_data))
-
-        # 5. Final Result
-        self.generate_final_path_image(base_original_pip)
-        steps.append((self.convert_np_to_pixmap(self.final_path_image), "Final Result"))
-
-        dialog = StepViewerDialog(steps, self)
-        dialog.exec_()
-
-        self.display_image(self.final_path_image)
-        self.app_state = AppState.DONE
-        self.update_ui_for_state()
 
     def generate_final_path_image(self, base_original_pip: np.ndarray):
         """Generates the final result image with the path drawn on the original MIP.
@@ -1948,7 +2074,7 @@ class VesselTracerApp(QMainWindow):
 
         return traces
 
-    def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None):
+    def find_path_astar(self, cost_map, start, end, vessel_identity_map, viz_callback=None, force_vessel_id: Optional[int] = None):
         """Finds the optimal path between two points using the A* algorithm.
 
         This implementation includes costs for distance, time (frame index),
@@ -1961,6 +2087,7 @@ class VesselTracerApp(QMainWindow):
             end: The ending (y, x) coordinate tuple.
             vessel_identity_map: The map assigning a unique ID to each vessel.
             viz_callback: An optional function to call for visualizing the search.
+            force_vessel_id: If provided, adds a massive penalty to any pixel not belonging to this ID.
 
         Returns:
             A list of (y, x) tuples representing the path, or None if no path is found.
@@ -2018,6 +2145,13 @@ class VesselTracerApp(QMainWindow):
                         if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
                             cross_vessel_penalty = self.CROSS_VESSEL_PENALTY
 
+                    # --- Forced vessel ID penalty ---
+                    force_penalty = 0
+                    if force_vessel_id is not None and vessel_identity_map is not None:
+                        neighbor_id = vessel_identity_map[neighbor]
+                        if neighbor_id != force_vessel_id:
+                            force_penalty = 1e8 # Very high cost
+
                     # --- Morphology-aware path penalty ---
                     turn_penalty = 0
                     parent = came_from.get(current)
@@ -2036,7 +2170,7 @@ class VesselTracerApp(QMainWindow):
 
                     move_cost = np.sqrt(dr ** 2 + dc ** 2)
                     time_cost = self.TIME_COST_WEIGHT * cost_map[neighbor]
-                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+                    new_g_cost = g_costs[current] + move_cost + time_cost + turn_penalty + cross_vessel_penalty + force_penalty
 
                     if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
                         g_costs[neighbor] = new_g_cost
@@ -2084,6 +2218,8 @@ class VesselTracerApp(QMainWindow):
         self.drawing_mode = None
         self.final_paths = None
         self.alternative_paths = None
+        self.committed_path = None
+        self.candidate_branches = None
         self.final_path_image = None
         self.base_mask_projection = None
         self.temporal_cost_map = None
