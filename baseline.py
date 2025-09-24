@@ -90,17 +90,72 @@ def get_most_frequent_color(image: np.ndarray) -> int:
     return unique[np.argmax(counts)]
 
 
-def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
+def is_path_valid(p1_xy: Tuple[int, int], p2_xy: Tuple[int, int], evidence_image: np.ndarray, threshold: int) -> bool:
+    """
+    Checks if the straight-line path between two points has sufficient "evidence"
+    in a given image by analyzing the average pixel intensity along the line.
+
+    Args:
+        p1_xy: The (x, y) coordinates of the starting point.
+        p2_xy: The (x, y) coordinates of the ending point.
+        evidence_image: The grayscale image (e.g., a filter response map) to check for the path.
+        threshold: The minimum average pixel intensity required to validate the path.
+
+    Returns:
+        True if the average intensity along the path is >= threshold, False otherwise.
+    """
+    # Note: cv2.lineIterator is not available in all OpenCV builds.
+    # A manual implementation is more robust.
+    x1, y1 = p1_xy
+    x2, y2 = p2_xy
+
+    dx = abs(x2 - x1)
+    dy = -abs(y2 - y1)
+    sx = 1 if x1 < x2 else -1
+    sy = 1 if y1 < y2 else -1
+    err = dx + dy
+
+    path_pixels = []
+
+    h, w = evidence_image.shape
+
+    while True:
+        if 0 <= y1 < h and 0 <= x1 < w:
+            path_pixels.append(evidence_image[y1, x1])
+        else: # Path goes out of bounds, likely invalid
+            return False
+
+        if x1 == x2 and y1 == y2:
+            break
+
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x1 += sx
+        if e2 <= dx:
+            err += dx
+            y1 += sy
+
+    if not path_pixels:
+        return False
+
+    average_intensity = np.mean(path_pixels)
+    return average_intensity >= threshold
+
+
+def bridge_gaps_in_mask(mask: np.ndarray, path_evidence_image: np.ndarray, max_distance: int, path_validation_threshold: int) -> np.ndarray:
     """Intelligently connects separated vessel segments in a binary mask.
 
     This method is more accurate than simple dilation. It skeletonizes the mask,
     finds endpoints of the skeleton lines, and connects the closest pair of
     endpoints that belong to different contours, provided they are within
-    `max_distance`.
+    `max_distance` and there is sufficient evidence in the `path_evidence_image`.
 
     Args:
         mask: The binary (0 or 255) vessel mask as a NumPy array.
+        path_evidence_image: Grayscale image used to validate the path.
         max_distance: The maximum pixel distance to bridge between two endpoints.
+        path_validation_threshold: The minimum intensity for a path to be valid.
 
     Returns:
         A new mask with gaps bridged, or a copy of the original if no bridging occurs.
@@ -160,7 +215,9 @@ def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
                 if dist < max_distance:
                     p1_xy = (int(p1_yx[1]), int(p1_yx[0]))
                     p2_xy = (int(p2_yx[1]), int(p2_yx[0]))
-                    cv2.line(bridged_mask, p1_xy, p2_xy, 255, 1)
+                    # --- MODIFIED: Validate path before drawing line ---
+                    if is_path_valid(p1_xy, p2_xy, path_evidence_image, path_validation_threshold):
+                        cv2.line(bridged_mask, p1_xy, p2_xy, 255, 1)
 
     return bridged_mask
 
@@ -257,7 +314,7 @@ def create_enhanced_vessel_masks(images: List[np.ndarray], noise_rois: List[QRec
         _, binary_mask = cv2.threshold(normalized_response, 30, 255, cv2.THRESH_BINARY)
         # --- End of new pipeline ---
 
-        bridged_mask = bridge_gaps_in_mask(binary_mask, max_gap_dist)
+        bridged_mask = bridge_gaps_in_mask(binary_mask, normalized_response, max_gap_dist, app_instance.PATH_VALIDATION_THRESHOLD)
         masks.append(bridged_mask)
 
         if worker_thread:
@@ -865,6 +922,7 @@ class VesselTracerApp(QMainWindow):
     PATHFINDING_OBSTACLE_COST = 1e9
     TURN_PENALTY_WEIGHT = 50.0  # Added: Turn penalty weight
     CROSS_VESSEL_PENALTY = 1e6  # Added: Penalty for jumping between vessels
+    PATH_VALIDATION_THRESHOLD = 50  # Added: Min intensity to validate a gap connection.
 
     def __init__(self):
         """Initializes the main application window, state variables, and UI."""
