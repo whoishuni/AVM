@@ -980,6 +980,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "--collect-all", "skimage",
                 "--collect-all", "plotly",
                 "--hidden-import", "pytz",
+                "--exclude-module", "PyQt5",
                 "--noconfirm"
             ]
 
