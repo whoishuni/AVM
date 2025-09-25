@@ -70,6 +70,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.path_points_info: List[Dict[str, Any]] = []
         self.app_state: AppState = AppState.IDLE
         self.smoothing_level: int = 4
+        self.path_visibility: Dict[str, bool] = {"Main Path": True, "Alternative 1": True, "Alternative 2": True}
 
         self.init_ui()
         self.create_actions()
@@ -115,44 +116,65 @@ class YC_VesselTracerApp(QMainWindow):
                 "param_straight_path_threshold_desc": "Cosine similarity threshold to consider a path segment 'straight'. Used for penalizing turns.",
                 "param_cross_vessel_penalty_desc": "A large penalty applied when a path crosses into a different vessel, based on the identity map.",
                 "param_main_vessel_width_tolerance_desc": "Tolerance (as a percentage) for how much a side branch's width can deviate from the main vessel's width.",
-                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch."
+                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch.",
+                "pan_mode": "Pan Mode",
+                "reset_view": "Reset View",
+                "replay_animation": "Replay Animation"
             },
             "zh": {
-                "app_title": "YC_血管尋路", "select_folder": "選擇圖片資料夾",
-                "start_marking": "開始標記路徑", "confirm_points": "確認標記點",
-                "run_analysis": "執行完整分析", "analysis_complete": "分析完成",
-                "processing": "處理中...", "reset_all": "全部重置",
-                "draw_noise": "繪製雜訊區域", "adjust_smoothing": "調整平滑度",
-                "preview_mask": "預覽遮罩", "show_3d_view": "顯示3D視圖",
-                "view_steps": "查看步驟", "file_menu": "檔案 (&F)", "edit_menu": "編輯 (&E)",
-                "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)",
-                "open_folder_action": "開啟資料夾 (&O)...", "reset_action": "重置 (&R)",
-                "exit_action": "離開 (&X)", "parameters_action": "參數設定 (&P)...",
-                "zoom_in_action": "放大 (&I)", "zoom_out_action": "縮小 (&O)",
-                "reset_zoom_action": "重置縮放 (&Z)", "controls_action": "控制與參數說明 (&C)...",
-                "group_load": "步驟一：載入圖片", "group_configure": "步驟二：標記與設定",
-                "group_execute": "步驟三：執行", "group_view_reset": "檢視與重置",
-                "frame_label": "幀: {0}/{1}",
-                "info_idle": "點擊 '選擇圖片資料夾' 或使用 檔案 > 開啟資料夾 來開始。",
-                "info_loaded": "圖片已載入。點擊 '開始標記路徑' 來選擇標記點。",
-                "info_marking": "已標記 {0} 個點。使用 'A'/'D' 或滑桿來切換幀。點擊以進行標記。",
-                "info_confirmed": "標記點已確認。平滑度: {0}。請繪製雜訊區域或開始分析。",
-                "info_processing": "正在執行分析，請稍候...",
-                "info_done": "路徑分析完成！點擊 '全部重置' 來開始新的分析。",
-                "info_drawing_noise": "在影像上拖動滑鼠以繪製要排除的雜訊區域。",
-                "param_bg_removal_offset_desc": "用於自適應閾值以去除背景的偏移量。值越高，去除的背景越多，但可能會裁切到血管。",
-                "param_bg_removal_kernel_size": "用於背景估計的核心大小。必須是奇數。較大的值能更好地處理不均勻光照。",
-                "param_max_node_search_radius_desc": "點擊某個點時，搜尋血管片段的最大距離（以像素為單位）。",
-                "param_max_gap_bridge_distance_desc": "路徑尋找器將嘗試橋接的血管片段之間的最大間隙大小（以像素為單位）。",
-                "param_forbidden_zone_radius_desc": "路徑起點/終點周圍的半徑，路徑尋找器不能重新進入該區域，以防止循環。",
-                "param_time_cost_weight_desc": "在幀（時間）之間移動的成本的權重乘數。較高的值偏好在時間上更短的路徑。",
-                "param_pathfinding_obstacle_cost_desc": "被視為障礙的像素的絕對成本。應該是一個非常大的數字。",
-                "param_turn_penalty_weight_desc": "轉彎時應用的懲罰。較高的值會產生更直的路徑。",
-                "param_dynamic_cost_weight_desc": "動態增加到路徑的成本的乘數，以不鼓勵為替代路徑重複使用相同的像素。",
-                "param_straight_path_threshold_desc": "用於判斷路徑片段是否為「直線」的餘弦相似度閾值。用於懲罰轉彎。",
-                "param_cross_vessel_penalty_desc": "當路徑根據身份圖跨越到不同的血管時，應用的巨大懲罰。",
-                "param_main_vessel_width_tolerance_desc": "側枝寬度與主血管寬度可以偏離的容差（百分比）。",
-                "param_side_branch_turn_penalty_multiplier_desc": "當路徑正在探索潛在的側枝時，專門為轉彎懲罰應用的乘數。"
+                "app_title": "YC_血管路徑追蹤",
+                "select_folder": "選擇圖片資料夾",
+                "start_marking": "開始標記",
+                "confirm_points": "確認標記點",
+                "run_analysis": "執行分析",
+                "analysis_complete": "分析完成",
+                "processing": "處理中...",
+                "reset_all": "全部重置",
+                "draw_noise": "繪製雜訊區",
+                "adjust_smoothing": "調整平滑度",
+                "preview_mask": "預覽遮罩",
+                "show_3d_view": "3D檢視",
+                "view_steps": "檢視步驟",
+                "file_menu": "檔案 (&F)",
+                "edit_menu": "編輯 (&E)",
+                "view_menu": "檢視 (&V)",
+                "help_menu": "幫助 (&H)",
+                "open_folder_action": "開啟資料夾 (&O)...",
+                "reset_action": "重置 (&R)",
+                "exit_action": "離開 (&X)",
+                "parameters_action": "參數設定 (&P)...",
+                "zoom_in_action": "放大 (&I)",
+                "zoom_out_action": "縮小 (&O)",
+                "reset_zoom_action": "重置縮放 (&Z)",
+                "controls_action": "操作說明 (&C)...",
+                "group_load": "步驟一：載入",
+                "group_configure": "步驟二：設定",
+                "group_execute": "步驟三：執行",
+                "group_view_reset": "檢視與重置",
+                "frame_label": "影像: {0}/{1}",
+                "info_idle": "點擊 '選擇圖片資料夾' 開始，或由 '檔案' > '開啟資料夾'。",
+                "info_loaded": "影像已載入。請點擊 '開始標記' 以選擇路徑點。",
+                "info_marking": "已標記 {0} 點。使用 'A'/'D' 或滑桿切換影像。點擊以新增標記。",
+                "info_confirmed": "標記點已確認。平滑度: {0}。可繪製雜訊區或開始分析。",
+                "info_processing": "分析進行中，請稍候...",
+                "info_done": "路徑分析完成！點擊 '全部重置' 以進行新的分析。",
+                "info_drawing_noise": "在影像上拖曳滑鼠以繪製需排除的雜訊區域。",
+                "param_bg_removal_offset_desc": "背景移除的閾值偏移量。較高數值可移除更多背景，但可能影響血管邊緣。",
+                "param_bg_removal_kernel_size": "背景估算的核心大小（奇數）。較大數值能應對不均勻的光照。",
+                "param_max_node_search_radius_desc": "點擊標記點時，在血管遮罩上尋找對應像素的最大半徑。",
+                "param_max_gap_bridge_distance_desc": "路徑尋找時，可橋接血管斷點的最大像素距離。",
+                "param_forbidden_zone_radius_desc": "路徑起點/終點周圍的禁區半徑，避免路徑產生不必要迴圈。",
+                "param_time_cost_weight_desc": "跨影像（時間維度）移動的成本權重。較高數值傾向於時間上較短的路徑。",
+                "param_pathfinding_obstacle_cost_desc": "路徑尋找時，障礙物像素的絕對成本值（應設為極大值）。",
+                "param_turn_penalty_weight_desc": "路徑轉彎的懲罰權重。較高數值會使路徑更平直。",
+                "param_dynamic_cost_weight_desc": "為已走過路徑動態增加的成本，以利於尋找替代路徑。",
+                "param_straight_path_threshold_desc": "判斷路徑是否為直線的餘弦相似度閾值，用於計算轉彎懲罰。",
+                "param_cross_vessel_penalty_desc": "路徑跨越至不同血管（基於血管ID圖）時的巨大懲罰。",
+                "param_main_vessel_width_tolerance_desc": "側枝與主血管寬度差異的容忍度（百分比）。",
+                "param_side_branch_turn_penalty_multiplier_desc": "路徑探索潛在側枝時，對轉彎懲罰的特定加權倍數。",
+                "pan_mode": "平移模式",
+                "reset_view": "重置視圖",
+                "replay_animation": "重播動畫"
             }
         }
         return translations
@@ -172,7 +194,10 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_show_path.setText(self.tr("preview_mask"))
         self.btn_show_3d_view.setText(self.tr("show_3d_view"))
         self.btn_step_view.setText(self.tr("view_steps"))
+        self.btn_replay_animation.setText(self.tr("replay_animation"))
         self.btn_reset.setText(self.tr("reset_all"))
+        self.btn_pan_mode.setText(self.tr("pan_mode"))
+        self.btn_reset_view.setText(self.tr("reset_view"))
         self.open_action.setText(self.tr("open_folder_action"))
         self.reset_action.setText(self.tr("reset_action"))
         self.exit_action.setText(self.tr("exit_action"))
@@ -256,13 +281,20 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.group_view_reset = QGroupBox()
         group4_layout = QHBoxLayout(self.group_view_reset)
+        self.btn_pan_mode = QPushButton()
+        self.btn_pan_mode.setCheckable(True)
+        self.btn_reset_view = QPushButton()
         self.btn_show_path = QPushButton()
         self.btn_show_3d_view = QPushButton()
         self.btn_step_view = QPushButton()
+        self.btn_replay_animation = QPushButton()
         self.btn_reset = QPushButton()
+        group4_layout.addWidget(self.btn_pan_mode)
+        group4_layout.addWidget(self.btn_reset_view)
         group4_layout.addWidget(self.btn_show_path)
         group4_layout.addWidget(self.btn_show_3d_view)
         group4_layout.addWidget(self.btn_step_view)
+        group4_layout.addWidget(self.btn_replay_animation)
         group4_layout.addWidget(self.btn_reset)
         main_controls_layout.addWidget(self.group_view_reset)
 
@@ -277,12 +309,19 @@ class YC_VesselTracerApp(QMainWindow):
         self.image_label = YC_ImageLabel(self)
         self.layout.addWidget(self.image_label, 1)
 
+        bottom_layout = QHBoxLayout()
         self.info_label = QLabel()
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = self.info_label.font()
         font.setPointSize(14)
         self.info_label.setFont(font)
-        self.layout.addWidget(self.info_label)
+        bottom_layout.addWidget(self.info_label, 1)
+
+        self.path_visibility_group = QGroupBox("Path Visibility")
+        self.path_visibility_layout = QHBoxLayout(self.path_visibility_group)
+        self.path_visibility_group.setVisible(False)
+        bottom_layout.addWidget(self.path_visibility_group)
+        self.layout.addLayout(bottom_layout)
 
         self.setStatusBar(QStatusBar(self))
 
@@ -338,6 +377,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_show_path.clicked.connect(self.show_segmented_path_preview)
         self.btn_show_3d_view.clicked.connect(self.show_3d_view)
         self.btn_step_view.clicked.connect(self.show_step_viewer)
+        self.btn_pan_mode.toggled.connect(self.toggle_pan_mode)
+        self.btn_reset_view.clicked.connect(self.image_label.reset_zoom)
+        self.btn_replay_animation.clicked.connect(self.replay_path_animation_from_button)
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
@@ -364,6 +406,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.statusBar().showMessage(self.tr(config.get("status_key", "Ready")))
         self.group_tools.setVisible(config["tools_visible"])
         self.btn_show_3d_view.setVisible(self.app_state == AppState.DONE)
+        self.btn_replay_animation.setVisible(self.app_state == AppState.DONE)
         self.frame_slider.setEnabled(config["slider_enabled"])
         self.btn_select_folder.setEnabled(config["select_folder_enabled"] and is_interactive)
         self.btn_reset.setEnabled(is_interactive)
@@ -373,8 +416,16 @@ class YC_VesselTracerApp(QMainWindow):
         self.zoom_in_action.setEnabled(bool(self.images))
         self.zoom_out_action.setEnabled(bool(self.images))
         self.reset_zoom_action.setEnabled(bool(self.images))
+        self.btn_pan_mode.setEnabled(bool(self.images))
+        self.btn_reset_view.setEnabled(bool(self.images))
         if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
             self.info_label.setText(self.tr("info_drawing_noise"))
+
+    def toggle_pan_mode(self, checked):
+        self.image_label.set_panning(checked)
+        if checked:
+            self.drawing_mode = None
+            self.btn_add_noise_roi.setChecked(False)
 
     def keyPressEvent(self, event):
         if not self.images or self.app_state not in [AppState.LOADED, AppState.MARKING_PATH]:
@@ -629,8 +680,8 @@ class YC_VesselTracerApp(QMainWindow):
             path_points = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(path_base_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
 
-        anim_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
-        steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", anim_data))
+        self.animation_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
+        steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", self.animation_data))
 
         self.generate_final_path_image(base_original_pip)
         steps.append((convert_np_to_pixmap(self.final_path_image), "Final Result"))
@@ -641,6 +692,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.image_label.setPixmap(convert_np_to_pixmap(self.final_path_image))
         self.app_state = AppState.DONE
         self.update_ui_for_state()
+        self.setup_path_visibility_controls()
 
     def generate_final_path_image(self, base_original_pip):
         final_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
@@ -648,16 +700,50 @@ class YC_VesselTracerApp(QMainWindow):
             self.final_path_image = final_image
             return
 
-        main_path = self.final_paths[0]
-        path_points = np.array(main_path, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.polylines(final_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
+        if self.path_visibility.get("Main Path", True):
+            main_path = self.final_paths[0]
+            path_points = np.array(main_path, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(final_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
 
-        for alt_path in self.alternative_paths:
-            alt_path_points = np.array(alt_path, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(final_image, [alt_path_points[:,:,::-1]], isClosed=False, color=(255, 255, 0), thickness=2, lineType=cv2.LINE_AA)
+        for i, alt_path in enumerate(self.alternative_paths):
+            if self.path_visibility.get(f"Alternative {i+1}", True):
+                alt_path_points = np.array(alt_path, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.polylines(final_image, [alt_path_points[:,:,::-1]], isClosed=False, color=(255, 255, 0), thickness=2, lineType=cv2.LINE_AA)
 
         self.final_path_image = final_image
         self.overlay_points_on_image(self.final_path_image)
+
+    def replay_path_animation_from_button(self):
+        if self.app_state == AppState.DONE and hasattr(self, 'animation_data'):
+            self.replay_path_animation(self.animation_data)
+        else:
+            QMessageBox.information(self, "Animation Data Not Found", "Please run the analysis again to generate animation data.")
+
+    def setup_path_visibility_controls(self):
+        for i in reversed(range(self.path_visibility_layout.count())):
+            self.path_visibility_layout.itemAt(i).widget().setParent(None)
+
+        all_paths = (self.final_paths or []) + (self.alternative_paths or [])
+        path_names = ["Main Path"] + [f"Alternative {i+1}" for i in range(len(self.alternative_paths or []))]
+
+        for i, name in enumerate(path_names):
+            if i < len(all_paths):
+                checkbox = QCheckBox(name)
+                checkbox.setChecked(self.path_visibility.get(name, True))
+                checkbox.toggled.connect(lambda state, n=name: self._update_path_visibility(n, state))
+                self.path_visibility_layout.addWidget(checkbox)
+
+        self.path_visibility_group.setVisible(True)
+
+    def _update_path_visibility(self, name: str, state: bool):
+        self.path_visibility[name] = state
+        frame_range = self._get_frame_range(for_processing=False)
+        if not frame_range: return
+        start_f, end_f = frame_range
+        base_original_pip = create_maximum_intensity_projection(self.images[start_f:end_f + 1])
+        if base_original_pip is not None:
+            self.generate_final_path_image(base_original_pip)
+            self.image_label.setPixmap(convert_np_to_pixmap(self.final_path_image))
 
     def overlay_points_on_image(self, image):
         for i, p_info in enumerate(self.path_points_info):
