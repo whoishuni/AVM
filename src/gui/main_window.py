@@ -822,7 +822,7 @@ class YC_VesselTracerApp(QMainWindow):
         fig = go.Figure(data=plot_traces)
         fig.update_layout(title_text='YC 3D Vessel Path', scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Frame (Time)', aspectratio=dict(x=1, y=1, z=0.5)), margin=dict(l=0, r=0, b=0, t=40))
         fig.update_scenes(yaxis_autorange="reversed")
-        html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        html_content = fig.to_html(full_html=False, include_plotlyjs=True)
 
         dialog = YC_PlotlyViewerDialog(html_content, self)
         dialog.exec()
