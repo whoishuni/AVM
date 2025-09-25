@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QFileDialog, QLabel, QStatusBar, QMainWindow, QMessageBox,
     QSizePolicy, QProgressDialog, QSlider, QDialog, QGroupBox, QStyle,
-    QCheckBox
+    QCheckBox, QComboBox
 )
 from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
@@ -285,14 +285,20 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_show_path = QPushButton()
         self.btn_show_3d_view = QPushButton()
         self.btn_step_view = QPushButton()
+        self.path_replay_selector = QComboBox()
         self.btn_replay_animation = QPushButton()
         self.btn_reset = QPushButton()
+
+        replay_layout = QHBoxLayout()
+        replay_layout.addWidget(self.path_replay_selector)
+        replay_layout.addWidget(self.btn_replay_animation)
+
         view_reset_buttons_layout.addWidget(self.btn_pan_mode)
         view_reset_buttons_layout.addWidget(self.btn_reset_view)
         view_reset_buttons_layout.addWidget(self.btn_show_path)
         view_reset_buttons_layout.addWidget(self.btn_show_3d_view)
         view_reset_buttons_layout.addWidget(self.btn_step_view)
-        view_reset_buttons_layout.addWidget(self.btn_replay_animation)
+        view_reset_buttons_layout.addLayout(replay_layout)
         view_reset_buttons_layout.addWidget(self.btn_reset)
         group4_layout.addLayout(view_reset_buttons_layout)
 
@@ -408,6 +414,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.group_tools.setVisible(config["tools_visible"])
         self.btn_show_3d_view.setEnabled(self.app_state == AppState.DONE and is_interactive)
         self.btn_replay_animation.setEnabled(self.app_state == AppState.DONE and is_interactive)
+        self.path_replay_selector.setEnabled(self.app_state == AppState.DONE and is_interactive)
         self.frame_slider.setEnabled(config["slider_enabled"])
         self.btn_select_folder.setEnabled(config["select_folder_enabled"] and is_interactive)
         self.btn_reset.setEnabled(is_interactive)
@@ -705,21 +712,27 @@ class YC_VesselTracerApp(QMainWindow):
         self.update_path_display()
 
     def setup_path_visibility_controls(self):
-        # Clear previous checkboxes
+        # Clear previous controls
         while self.path_selection_layout.count():
             child = self.path_selection_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+        self.path_replay_selector.clear()
 
         all_paths = (self.final_paths or []) + (self.alternative_paths or [])
         self.visible_paths = [True] * len(all_paths)
 
         for i, path in enumerate(all_paths):
             path_name = f"Main Path" if i == 0 else f"Alternative {i}"
+
+            # Add checkbox for visibility
             checkbox = QCheckBox(path_name)
             checkbox.setChecked(True)
             checkbox.stateChanged.connect(lambda state, index=i: self.toggle_path_visibility(index, state))
             self.path_selection_layout.addWidget(checkbox)
+
+            # Add path to replay selector
+            self.path_replay_selector.addItem(path_name)
 
     def toggle_path_visibility(self, index, state):
         self.visible_paths[index] = (state == Qt.CheckState.Checked.value)
@@ -879,39 +892,39 @@ class YC_VesselTracerApp(QMainWindow):
         dialog.exec()
         self.statusBar().showMessage("Ready")
 
-    def replay_path_animation(self, anim_data=None):
-        if not hasattr(self, 'animation_data') or not self.animation_data:
-            QMessageBox.warning(self, "Animation Data Not Found",
-                                "Please run a full analysis first to generate the animation data.")
+    def replay_path_animation(self):
+        if not self.final_paths and not self.alternative_paths:
+            QMessageBox.warning(self, "No Paths Found", "No paths are available to animate.")
             return
 
-        self.statusBar().showMessage("Replaying pathfinding animation...")
-        # Use the stored animation data
-        cost_map = self.animation_data["costmap"]
-        pixels = self.animation_data["pixels"]
-        base_image = self.animation_data["baseimage"]
-        identity_map = self.animation_data["identity_map"]
-        width_map = self.animation_data["width_map"]
-        main_vessel_width = self.animation_data["main_vessel_width"]
+        selected_index = self.path_replay_selector.currentIndex()
+        all_paths = (self.final_paths or []) + (self.alternative_paths or [])
+        if not (0 <= selected_index < len(all_paths)):
+            return
 
-        def update_viz(visited):
+        selected_path = all_paths[selected_index]
+        base_image = self.final_path_base_image.copy()
+
+        self.statusBar().showMessage(f"Animating: {self.path_replay_selector.currentText()}")
+
+        for i in range(len(selected_path)):
+            # Draw the path up to the current point
             temp_img = base_image.copy()
-            for node in visited:
-                temp_img[node[0], node[1]] = (100, 0, 0) # Dark red for visited nodes
+            path_segment = np.array(selected_path[:i+1], dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(temp_img, [path_segment[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2, lineType=cv2.LINE_AA)
+
+            # Overlay the marked points
+            self.overlay_points_on_image(temp_img)
+
             self.image_label.setPixmap(convert_np_to_pixmap(temp_img))
             QApplication.processEvents()
+            # A small delay to make the animation visible
+            QApplication.instance().processEvents()
+            # time.sleep(0.001) # Optional: for slower animation
 
-        full_path = []
-        for i in range(len(pixels) - 1):
-            segment = find_path_astar(cost_map, pixels[i], pixels[i+1], identity_map, width_map, main_vessel_width, self.params, viz_callback=update_viz)
-            if segment:
-                full_path.extend(segment if i == 0 else segment[1:])
-
-        path_points = np.array(full_path, dtype=np.int32).reshape(-1, 1, 2)
-        final_image_with_path = base_image.copy()
-        cv2.polylines(final_image_with_path, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
-        self.image_label.setPixmap(convert_np_to_pixmap(final_image_with_path))
-        self.statusBar().showMessage("Animation replay finished.", 3000)
+        # Restore the full path view after animation
+        self.update_path_display()
+        self.statusBar().showMessage("Animation finished.", 3000)
 
     def closeEvent(self, event):
         self.reset_system()
