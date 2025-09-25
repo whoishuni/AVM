@@ -6,7 +6,7 @@ from enum import Enum, auto
 from typing import List, Optional, Tuple
 
 # --- PyQt6 Imports ---
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QPixmap, QImage, QIcon
 from PyQt6.QtCore import QPoint
 
 # --- Enums for State Management ---
@@ -153,3 +153,51 @@ def find_closest_pixel_on_mask(point: QPoint, mask_img: np.ndarray, max_radius: 
         return tuple(valid_points[min_dist_idx])
     else:
         return None
+
+def create_yc_icon() -> QIcon:
+    """Creates a dynamic QIcon with the letters 'YC'."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        # Create a 256x256 image with a transparent background
+        image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+
+        # Define colors and font
+        bg_color = (30, 144, 255)  # Dodger Blue
+        text_color = (255, 255, 255) # White
+
+        # Draw a rounded rectangle background
+        draw.rounded_rectangle(
+            (10, 10, 246, 246),
+            radius=40,
+            fill=bg_color
+        )
+
+        # Select a font
+        try:
+            # Use a common, modern-looking font
+            font = ImageFont.truetype("arialbd.ttf", 150)
+        except IOError:
+            # Fallback to default font if Arial Bold is not found
+            font = ImageFont.load_default()
+
+        # Calculate text position to center it
+        text = "YC"
+        # Use textbbox for more accurate centering
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        position = ((256 - text_width) / 2, (256 - text_height) / 2 - 15) # Minor vertical adjustment
+
+        # Draw the text
+        draw.text(position, text, font=font, fill=text_color)
+
+        # Convert PIL image to QImage
+        q_image = QImage(image.tobytes("raw", "RGBA"), image.width, image.height, QImage.Format.Format_RGBA8888)
+
+        return QIcon(QPixmap.fromImage(q_image))
+
+    except ImportError:
+        # Return an empty QIcon if Pillow is not installed
+        return QIcon()

@@ -30,7 +30,7 @@ from core.image_processing import (
 from core.pathfinding import find_path_astar
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
-    convert_np_to_pixmap, AppState, DrawingMode
+    convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
 )
 from utils.threading import ProgressUpdater
 import plotly.graph_objects as go
@@ -59,10 +59,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.setWindowTitle(self.tr("app_title"))
         self.setGeometry(100, 100, 1280, 960)
 
-        # Set window icon
-        icon_path = os.path.join(os.path.dirname(__file__), '..', '..', 'assets', 'yc_icon.ico')
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        # Set window icon dynamically
+        self.setWindowIcon(create_yc_icon())
 
         self.set_stylesheet()
 
@@ -984,7 +982,6 @@ class YC_VesselTracerApp(QMainWindow):
                 "--name", "YC_VesselTracer",
                 "--windowed",
                 "--paths", "src",
-                "--add-data", f"assets{os.pathsep}assets",
                 "--collect-all", "skimage",
                 "--collect-all", "plotly",
                 "--hidden-import", "pytz",
