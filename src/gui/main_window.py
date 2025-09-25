@@ -202,8 +202,14 @@ class YC_VesselTracerApp(QMainWindow):
         self.update_ui_for_state()
 
     def show_introduction_dialog(self):
-        # Assumes README.md is in the root directory, one level up from src
-        readme_path = os.path.join(os.path.dirname(__file__), '..', '..', 'README.md')
+        # Select the README file based on the current language
+        readme_filename = "README_zh.md" if self.language == "zh" else "README.md"
+        readme_path = os.path.join(os.path.dirname(__file__), '..', '..', readme_filename)
+
+        # Fallback to English README if the translated one doesn't exist
+        if not os.path.exists(readme_path):
+            readme_path = os.path.join(os.path.dirname(__file__), '..', '..', 'README.md')
+
         dialog = YC_MarkdownDialog(os.path.abspath(readme_path), self)
         dialog.exec()
 
