@@ -18,7 +18,6 @@ from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
 from gui.image_label import YC_ImageLabel
 from gui.smoothing_dialog import YC_SmoothingPreviewDialog
 from gui.step_viewer_dialog import YC_StepViewerDialog
-from gui.plotly_viewer_dialog import YC_PlotlyViewerDialog
 from gui.help_dialog import YC_HelpDialog
 from gui.parameter_dialog import YC_ParameterDialog
 from gui.markdown_dialog import YC_MarkdownDialog
@@ -35,6 +34,9 @@ from utils.helpers import (
 from utils.threading import ProgressUpdater
 import plotly.graph_objects as go
 import subprocess
+import webbrowser
+import tempfile
+import pathlib
 
 class YC_VesselTracerApp(QMainWindow):
     """The main application window for the YC 2D vessel tracing tool."""
@@ -817,16 +819,45 @@ class YC_VesselTracerApp(QMainWindow):
         plot_traces = self.generate_3d_plot_data()
         if not plot_traces:
             QMessageBox.warning(self, "Error", "Could not generate data for the 3D plot.")
+            self.statusBar().showMessage("Error generating 3D plot.", 5000)
             return
 
         fig = go.Figure(data=plot_traces)
-        fig.update_layout(title_text='YC 3D Vessel Path', scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Frame (Time)', aspectratio=dict(x=1, y=1, z=0.5)), margin=dict(l=0, r=0, b=0, t=40))
+        fig.update_layout(
+            title_text='YC 3D Vessel Path',
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Frame (Time)',
+                aspectratio=dict(x=1, y=1, z=0.5)
+            ),
+            margin=dict(l=0, r=0, b=0, t=40)
+        )
         fig.update_scenes(yaxis_autorange="reversed")
-        html_content = fig.to_html(full_html=False, include_plotlyjs=True)
 
-        dialog = YC_PlotlyViewerDialog(html_content, self)
-        dialog.exec()
-        self.statusBar().showMessage("Ready")
+        # Generate self-contained HTML
+        html_content = fig.to_html(full_html=True, include_plotlyjs=True)
+        file_url = ""
+        try:
+            # Save to a temporary file
+            with tempfile.NamedTemporaryFile('w', delete=False, suffix='.html', encoding='utf-8') as f:
+                f.write(html_content)
+                # Get the file path as a URL
+                file_url = pathlib.Path(f.name).as_uri()
+
+            # Try to open in the default web browser
+            opened = webbrowser.open(file_url)
+            if not opened:
+                raise webbrowser.Error("Browser could not be opened.")
+            self.statusBar().showMessage("3D view opened in browser.", 5000)
+
+        except Exception as e:
+            # If it fails, show a message with the path
+            error_msg = f"無法自動開啟瀏覽器。\n\n請手動開啟此檔案路徑:\n{file_url}\n\n錯誤: {e}"
+            QMessageBox.information(self,
+                                    self.tr("show_3d_view"),
+                                    error_msg)
+            self.statusBar().showMessage("無法自動開啟瀏覽器", 5000)
 
     def generate_3d_plot_data(self):
         if not self.vessel_masks: return []
