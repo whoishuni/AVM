@@ -105,6 +105,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "open_folder_action": "&Open Folder...", "reset_action": "&Reset",
                 "exit_action": "E&xit", "parameters_action": "&Parameters...",
                 "package_action": "Package Application", "update_action": "Check for Updates",
+                "update_available_msg": "A new version is available. Please confirm with YC if an update is needed.",
                 "zoom_in_action": "Zoom &In", "zoom_out_action": "Zoom &Out",
                 "reset_zoom_action": "Reset &Zoom", "controls_action": "&Controls & Parameters...",
                 "group_load": "Step 1: Load Images", "group_configure": "Step 2: Mark & Configure",
@@ -146,6 +147,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)", "tools_menu": "工具 (&T)",
                 "open_folder_action": "開啟資料夾 (&O)...", "reset_action": "重置 (&R)",
                 "package_action": "一鍵打包", "update_action": "檢查更新",
+                "update_available_msg": "發現系統已更新，請跟昱辰確認是否需要更新",
                 "exit_action": "離開 (&X)", "parameters_action": "參數設定 (&P)...",
                 "zoom_in_action": "放大 (&I)", "zoom_out_action": "縮小 (&O)",
                 "reset_zoom_action": "重置縮放 (&Z)", "controls_action": "控制與參數說明 (&C)...",
@@ -1015,9 +1017,9 @@ class YC_VesselTracerApp(QMainWindow):
             remote_commit = subprocess.check_output(["git", "rev-parse", "origin/main"]).strip()
 
             if local_commit == remote_commit:
-                QMessageBox.information(self, "檢查更新", "已是最新版本。")
+                QMessageBox.information(self, self.tr("update_action"), "已是最新版本。")
             else:
-                QMessageBox.information(self, "檢查更新", "發現系統已更新，請跟昱辰 or YC確認是否需要更新")
+                QMessageBox.information(self, self.tr("update_action"), self.tr("update_available_msg"))
 
         except subprocess.CalledProcessError as e:
             # This can happen if git is not installed, or this is not a git repository
