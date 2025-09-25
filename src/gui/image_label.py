@@ -67,16 +67,11 @@ class YC_ImageLabel(QLabel):
 
         return QPoint(int(img_x), int(img_y))
 
-    def set_panning(self, enable: bool):
-        self.is_panning = enable
-        if self.is_panning:
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
     def mousePressEvent(self, event):
-        if (event.button() == Qt.MouseButton.LeftButton and self.is_panning) or \
+        is_pan_mode = self.main_window.drawing_mode == DrawingMode.PAN
+        if (event.button() == Qt.MouseButton.LeftButton and is_pan_mode) or \
            (event.button() == Qt.MouseButton.MiddleButton and self.current_pixmap):
+            self.is_panning = True
             self.last_pan_pos = event.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         elif event.button() == Qt.MouseButton.LeftButton:
@@ -84,7 +79,7 @@ class YC_ImageLabel(QLabel):
             if not image_coords:
                 return
 
-            if self.main_window.app_state == AppState.MARKING_PATH:
+            if self.main_window.app_state == AppState.MARKING_PATH and self.main_window.drawing_mode == DrawingMode.MARKING:
                 self.point_clicked.emit(image_coords)
             elif self.main_window.drawing_mode == DrawingMode.NOISE_ROI:
                 self.is_drawing_roi = True
@@ -92,10 +87,7 @@ class YC_ImageLabel(QLabel):
                 self.update()
 
     def mouseMoveEvent(self, event):
-        is_panning_button = (event.buttons() & Qt.MouseButton.LeftButton and self.is_panning) or \
-                            (event.buttons() & Qt.MouseButton.MiddleButton)
-
-        if is_panning_button and self.current_pixmap:
+        if self.is_panning and self.current_pixmap:
             delta = event.pos() - self.last_pan_pos
             self.pan_offset += delta
             self.last_pan_pos = event.pos()
@@ -109,9 +101,11 @@ class YC_ImageLabel(QLabel):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if (event.button() == Qt.MouseButton.LeftButton and self.is_panning) or \
-           (event.button() == Qt.MouseButton.MiddleButton):
-            self.setCursor(Qt.CursorShape.OpenHandCursor if self.is_panning else Qt.CursorShape.ArrowCursor)
+        is_pan_mode = self.main_window.drawing_mode == DrawingMode.PAN
+        if (event.button() == Qt.MouseButton.LeftButton and is_pan_mode) or \
+           (event.button() == Qt.MouseButton.MiddleButton and self.is_panning):
+            self.is_panning = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor if is_pan_mode else Qt.CursorShape.ArrowCursor)
         elif event.button() == Qt.MouseButton.LeftButton and self.is_drawing_roi:
             self.is_drawing_roi = False
             if self.current_drawing_roi and self.current_drawing_roi.width() > 5 and self.current_drawing_roi.height() > 5:

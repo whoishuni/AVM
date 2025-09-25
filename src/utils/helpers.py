@@ -22,7 +22,9 @@ class AppState(Enum):
 
 class DrawingMode(Enum):
     """Defines the available drawing modes for the user."""
+    MARKING = auto()          # Marking points on the vessel.
     NOISE_ROI = auto()        # Drawing a rectangle to define a noise area.
+    PAN = auto()              # Panning the image.
 
 # --- Image and File I/O Functions ---
 
