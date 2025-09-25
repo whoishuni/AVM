@@ -32,6 +32,7 @@ class YC_HelpDialog(QDialog):
         controls_layout.setVerticalSpacing(10)
 
         controls_label = QLabel("<h2>Controls & Shortcuts</h2>")
+        controls_label.setStyleSheet("color: black;")
         main_layout.addWidget(controls_label)
 
         shortcuts = [
@@ -49,9 +50,12 @@ class YC_HelpDialog(QDialog):
             ("Pan Image", "Middle Mouse Button + Drag"),
         ]
 
-        key_style = "background-color: #555; color: #EEE; padding: 2px 6px; border-radius: 4px; font-weight: bold;"
+        desc_style = "color: black;"
+        key_style = "background-color: #DDD; color: black; padding: 2px 6px; border-radius: 4px; font-weight: bold;"
         for i, (desc, key) in enumerate(shortcuts):
-            controls_layout.addWidget(QLabel(desc), i, 0)
+            desc_label = QLabel(desc)
+            desc_label.setStyleSheet(desc_style)
+            controls_layout.addWidget(desc_label, i, 0)
             key_label = QLabel(key)
             key_label.setStyleSheet(key_style)
             key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -72,14 +76,17 @@ class YC_HelpDialog(QDialog):
         params_layout.setVerticalSpacing(10)
 
         params_label = QLabel("<h2>Algorithm Parameters</h2>")
+        params_label.setStyleSheet("color: black;")
         main_layout.addWidget(params_label)
 
-        param_name_style = "font-weight: bold; color: #00A0A0;"
+        param_name_style = "font-weight: bold; color: black;"
+        param_desc_style = "color: black;"
         for i, (name, meta) in enumerate(self.params_meta.items()):
             desc, _, _, _ = meta
             name_label = QLabel(name)
             name_label.setStyleSheet(param_name_style)
             desc_label = QLabel(desc)
+            desc_label.setStyleSheet(param_desc_style)
             desc_label.setWordWrap(True)
             params_layout.addWidget(name_label, i, 0)
             params_layout.addWidget(desc_label, i, 1)
