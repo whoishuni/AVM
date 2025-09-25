@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QProgressDialog, QSlider, QDialog, QGroupBox, QStyle,
     QCheckBox, QComboBox
 )
-from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence
+from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence, QIcon
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
 
 # --- Project-specific Imports ---
@@ -58,6 +58,12 @@ class YC_VesselTracerApp(QMainWindow):
         self.params = self.DEFAULT_PARAMS.copy()
         self.setWindowTitle(self.tr("app_title"))
         self.setGeometry(100, 100, 1280, 960)
+
+        # Set window icon
+        icon_path = os.path.join(os.path.dirname(__file__), '..', '..', 'assets', 'yc_icon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         self.set_stylesheet()
 
         self.images: List[np.ndarray] = []
@@ -977,6 +983,8 @@ class YC_VesselTracerApp(QMainWindow):
                 sys.executable, "-m", "PyInstaller", "main.py",
                 "--name", "YC_VesselTracer",
                 "--windowed",
+                "--paths", "src",
+                "--add-data", f"assets{os.pathsep}assets",
                 "--collect-all", "skimage",
                 "--collect-all", "plotly",
                 "--hidden-import", "pytz",
