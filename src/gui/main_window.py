@@ -249,64 +249,13 @@ class YC_VesselTracerApp(QMainWindow):
     def init_ui(self):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        self.layout = QVBoxLayout(self.central_widget)
-        main_controls_layout = QHBoxLayout()
-        self.layout.addLayout(main_controls_layout)
+        # Main layout is now horizontal
+        self.layout = QHBoxLayout(self.central_widget)
 
-        self.group_load = QGroupBox()
-        group1_layout = QHBoxLayout(self.group_load)
-        self.btn_select_folder = QPushButton()
-        group1_layout.addWidget(self.btn_select_folder)
-        main_controls_layout.addWidget(self.group_load)
-
-        self.group_configure = QGroupBox()
-        group2_layout = QHBoxLayout(self.group_configure)
-        self.btn_add_noise_roi = QPushButton()
-        self.btn_smoothing_preview = QPushButton()
-        group2_layout.addWidget(self.btn_add_noise_roi)
-        group2_layout.addWidget(self.btn_smoothing_preview)
-        main_controls_layout.addWidget(self.group_configure)
-        self.group_tools = self.group_configure
-
-        self.group_execute = QGroupBox()
-        group3_layout = QHBoxLayout(self.group_execute)
-        self.btn_main_action = QPushButton()
-        group3_layout.addWidget(self.btn_main_action)
-        main_controls_layout.addWidget(self.group_execute)
-
-        self.group_view_reset = QGroupBox()
-        group4_layout = QHBoxLayout(self.group_view_reset)
-
-        # Left side for buttons
-        view_reset_buttons_layout = QVBoxLayout()
-        self.btn_pan_mode = QPushButton()
-        self.btn_pan_mode.setCheckable(True)
-        self.btn_reset_view = QPushButton()
-        self.btn_show_path = QPushButton()
-        self.btn_show_3d_view = QPushButton()
-        self.btn_step_view = QPushButton()
-        self.path_replay_selector = QComboBox()
-        self.btn_replay_animation = QPushButton()
-        self.btn_reset = QPushButton()
-
-        replay_layout = QHBoxLayout()
-        replay_layout.addWidget(self.path_replay_selector)
-        replay_layout.addWidget(self.btn_replay_animation)
-
-        view_reset_buttons_layout.addWidget(self.btn_pan_mode)
-        view_reset_buttons_layout.addWidget(self.btn_reset_view)
-        view_reset_buttons_layout.addWidget(self.btn_show_path)
-        view_reset_buttons_layout.addWidget(self.btn_show_3d_view)
-        view_reset_buttons_layout.addWidget(self.btn_step_view)
-        view_reset_buttons_layout.addLayout(replay_layout)
-        view_reset_buttons_layout.addWidget(self.btn_reset)
-        group4_layout.addLayout(view_reset_buttons_layout)
-
-        # Right side for path checkboxes
-        self.path_selection_layout = QVBoxLayout()
-        group4_layout.addLayout(self.path_selection_layout)
-
-        main_controls_layout.addWidget(self.group_view_reset)
+        # --- Left side: Image display and controls ---
+        left_layout = QVBoxLayout()
+        self.image_label = YC_ImageLabel(self)
+        left_layout.addWidget(self.image_label, 1) # Set stretch factor to 1
 
         frame_nav_layout = QHBoxLayout()
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -314,17 +263,82 @@ class YC_VesselTracerApp(QMainWindow):
         self.frame_info_label = QLabel("Frame: -- / --")
         frame_nav_layout.addWidget(self.frame_slider)
         frame_nav_layout.addWidget(self.frame_info_label)
-        self.layout.addLayout(frame_nav_layout)
-
-        self.image_label = YC_ImageLabel(self)
-        self.layout.addWidget(self.image_label, 1)
+        left_layout.addLayout(frame_nav_layout)
 
         self.info_label = QLabel()
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = self.info_label.font()
         font.setPointSize(14)
         self.info_label.setFont(font)
-        self.layout.addWidget(self.info_label)
+        left_layout.addWidget(self.info_label)
+
+        self.layout.addLayout(left_layout, 1) # Set stretch factor to 1
+
+        # --- Right side: Control panels ---
+        right_controls_layout = QVBoxLayout()
+        right_controls_layout.setSpacing(15)
+
+        # Group 1: Load
+        self.group_load = QGroupBox()
+        group1_layout = QVBoxLayout(self.group_load)
+        self.btn_select_folder = QPushButton()
+        group1_layout.addWidget(self.btn_select_folder)
+        right_controls_layout.addWidget(self.group_load)
+
+        # Group 2: Configure
+        self.group_configure = QGroupBox()
+        group2_layout = QVBoxLayout(self.group_configure)
+        self.btn_add_noise_roi = QPushButton()
+        self.btn_smoothing_preview = QPushButton()
+        group2_layout.addWidget(self.btn_add_noise_roi)
+        group2_layout.addWidget(self.btn_smoothing_preview)
+        right_controls_layout.addWidget(self.group_configure)
+        self.group_tools = self.group_configure
+
+        # Group 3: Execute
+        self.group_execute = QGroupBox()
+        group3_layout = QVBoxLayout(self.group_execute)
+        self.btn_main_action = QPushButton()
+        group3_layout.addWidget(self.btn_main_action)
+        right_controls_layout.addWidget(self.group_execute)
+
+        # Group 4: View & Reset
+        self.group_view_reset = QGroupBox()
+        group4_layout = QVBoxLayout(self.group_view_reset)
+
+        self.btn_pan_mode = QPushButton()
+        self.btn_pan_mode.setCheckable(True)
+        self.btn_reset_view = QPushButton()
+        self.btn_show_path = QPushButton()
+        self.btn_show_3d_view = QPushButton()
+        self.btn_step_view = QPushButton()
+
+        replay_layout = QHBoxLayout()
+        self.path_replay_selector = QComboBox()
+        self.btn_replay_animation = QPushButton()
+        replay_layout.addWidget(self.path_replay_selector)
+        replay_layout.addWidget(self.btn_replay_animation)
+
+        self.path_selection_layout = QVBoxLayout()
+        self.path_selection_layout.setSpacing(5)
+
+        self.btn_reset = QPushButton()
+
+        group4_layout.addWidget(self.btn_pan_mode)
+        group4_layout.addWidget(self.btn_reset_view)
+        group4_layout.addWidget(self.btn_show_path)
+        group4_layout.addWidget(self.btn_show_3d_view)
+        group4_layout.addWidget(self.btn_step_view)
+        group4_layout.addLayout(replay_layout)
+        group4_layout.addLayout(self.path_selection_layout)
+        group4_layout.addWidget(self.btn_reset)
+        right_controls_layout.addWidget(self.group_view_reset)
+
+        right_controls_layout.addStretch(1) # Add stretch to push panels to the top
+
+        self.layout.addLayout(right_controls_layout, 0) # Stretch factor 0 for fixed width
+        self.layout.setStretchFactor(0, 3) # Image layout (index 0) takes 3/4 of space
+        self.layout.setStretchFactor(1, 1) # Controls layout (index 1) takes 1/4 of space
 
         self.setStatusBar(QStatusBar(self))
 
