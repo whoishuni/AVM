@@ -34,6 +34,7 @@ from utils.helpers import (
 )
 from utils.threading import ProgressUpdater
 import plotly.graph_objects as go
+import subprocess
 
 class YC_VesselTracerApp(QMainWindow):
     """The main application window for the YC 2D vessel tracing tool."""
@@ -51,6 +52,8 @@ class YC_VesselTracerApp(QMainWindow):
         super().__init__()
         self.language = language
         self.translations = self.get_translations()
+        # Check if running as a bundled executable
+        self.is_packaged = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 
         self.params = self.DEFAULT_PARAMS.copy()
         self.setWindowTitle(self.tr("app_title"))
@@ -94,9 +97,10 @@ class YC_VesselTracerApp(QMainWindow):
                 "draw_noise": "Draw Noise Area", "adjust_smoothing": "Adjust Smoothing",
                 "preview_mask": "Preview Mask", "show_3d_view": "Show 3D View",
                 "view_steps": "View Steps", "file_menu": "&File", "edit_menu": "&Edit",
-                "view_menu": "&View", "help_menu": "&Help",
+                "view_menu": "&View", "help_menu": "&Help", "tools_menu": "&Tools",
                 "open_folder_action": "&Open Folder...", "reset_action": "&Reset",
                 "exit_action": "E&xit", "parameters_action": "&Parameters...",
+                "package_action": "Package Application", "update_action": "Check for Updates",
                 "zoom_in_action": "Zoom &In", "zoom_out_action": "Zoom &Out",
                 "reset_zoom_action": "Reset &Zoom", "controls_action": "&Controls & Parameters...",
                 "group_load": "Step 1: Load Images", "group_configure": "Step 2: Mark & Configure",
@@ -112,7 +116,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "pan_mode": "Pan Tool", "reset_view": "Reset View", "replay_animation": "Replay Animation",
                 "introduction": "Introduction",
                 "param_bg_removal_offset_desc": "Offset for adaptive thresholding to remove background. Higher values remove more background but may clip vessels.",
-                "param_bg_removal_kernel_size": "Size of the kernel for background estimation. Must be an odd number. Larger values handle uneven lighting better.",
+                "param_bg_removal_kernel_desc": "Size of the kernel for background estimation. Must be an odd number. Larger values handle uneven lighting better.",
                 "param_max_node_search_radius_desc": "The maximum distance (in pixels) to search for a vessel segment when a point is clicked.",
                 "param_max_gap_bridge_distance_desc": "The maximum gap size (in pixels) the pathfinder will attempt to bridge between vessel segments.",
                 "param_forbidden_zone_radius_desc": "Radius around a path start/end point where the pathfinder cannot re-enter, preventing loops.",
@@ -135,8 +139,9 @@ class YC_VesselTracerApp(QMainWindow):
                 "view_steps": "查看步驟", "pan_mode": "平移工具", "reset_view": "重置視圖",
                 "replay_animation": "重播動畫", "introduction": "介紹",
                 "file_menu": "檔案 (&F)", "edit_menu": "編輯 (&E)",
-                "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)",
+                "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)", "tools_menu": "工具 (&T)",
                 "open_folder_action": "開啟資料夾 (&O)...", "reset_action": "重置 (&R)",
+                "package_action": "一鍵打包", "update_action": "檢查更新",
                 "exit_action": "離開 (&X)", "parameters_action": "參數設定 (&P)...",
                 "zoom_in_action": "放大 (&I)", "zoom_out_action": "縮小 (&O)",
                 "reset_zoom_action": "重置縮放 (&Z)", "controls_action": "控制與參數說明 (&C)...",
@@ -151,7 +156,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "info_done": "路徑分析完成！點擊 '全部重置' 來開始新的分析。",
                 "info_drawing_noise": "在影像上拖動滑鼠以繪製要排除的雜訊區域。",
                 "param_bg_removal_offset_desc": "用於自適應閾值以去除背景的偏移量。值越高，去除的背景越多，但可能會裁切到血管。",
-                "param_bg_removal_kernel_size": "用於背景估計的核心大小。必須是奇數。較大的值能更好地處理不均勻光照。",
+                "param_bg_removal_kernel_desc": "用於背景估計的核心大小。此數值必須為奇數。較大的值可以更好地處理不均勻的光照。",
                 "param_max_node_search_radius_desc": "點擊標記點時，在血管遮罩上搜尋對應像素點的最大半徑（單位：像素）。",
                 "param_max_gap_bridge_distance_desc": "路徑尋找演算法能夠連接的血管片段之間的最大間隙（單位：像素）。",
                 "param_forbidden_zone_radius_desc": "環繞路徑起點/終點的區域半徑，禁止路徑重新進入此區域以防止產生迴圈。",
@@ -199,10 +204,17 @@ class YC_VesselTracerApp(QMainWindow):
         self.edit_menu.setTitle(self.tr("edit_menu"))
         self.view_menu.setTitle(self.tr("view_menu"))
         self.help_menu.setTitle(self.tr("help_menu"))
+        self.tools_menu.setTitle(self.tr("tools_menu"))
+
+        if self.is_packaged:
+            self.packaging_action.setText(self.tr("update_action"))
+        else:
+            self.packaging_action.setText(self.tr("package_action"))
+
         self.update_ui_for_state()
 
     def show_introduction_dialog(self):
-        # Assumes README.md is in the root directory, one level up from src
+        # Always show the Chinese README as requested in the PR comment.
         readme_path = os.path.join(os.path.dirname(__file__), '..', '..', 'README.md')
         dialog = YC_MarkdownDialog(os.path.abspath(readme_path), self)
         dialog.exec()
@@ -249,64 +261,13 @@ class YC_VesselTracerApp(QMainWindow):
     def init_ui(self):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        self.layout = QVBoxLayout(self.central_widget)
-        main_controls_layout = QHBoxLayout()
-        self.layout.addLayout(main_controls_layout)
+        # Main layout is now horizontal
+        self.layout = QHBoxLayout(self.central_widget)
 
-        self.group_load = QGroupBox()
-        group1_layout = QHBoxLayout(self.group_load)
-        self.btn_select_folder = QPushButton()
-        group1_layout.addWidget(self.btn_select_folder)
-        main_controls_layout.addWidget(self.group_load)
-
-        self.group_configure = QGroupBox()
-        group2_layout = QHBoxLayout(self.group_configure)
-        self.btn_add_noise_roi = QPushButton()
-        self.btn_smoothing_preview = QPushButton()
-        group2_layout.addWidget(self.btn_add_noise_roi)
-        group2_layout.addWidget(self.btn_smoothing_preview)
-        main_controls_layout.addWidget(self.group_configure)
-        self.group_tools = self.group_configure
-
-        self.group_execute = QGroupBox()
-        group3_layout = QHBoxLayout(self.group_execute)
-        self.btn_main_action = QPushButton()
-        group3_layout.addWidget(self.btn_main_action)
-        main_controls_layout.addWidget(self.group_execute)
-
-        self.group_view_reset = QGroupBox()
-        group4_layout = QHBoxLayout(self.group_view_reset)
-
-        # Left side for buttons
-        view_reset_buttons_layout = QVBoxLayout()
-        self.btn_pan_mode = QPushButton()
-        self.btn_pan_mode.setCheckable(True)
-        self.btn_reset_view = QPushButton()
-        self.btn_show_path = QPushButton()
-        self.btn_show_3d_view = QPushButton()
-        self.btn_step_view = QPushButton()
-        self.path_replay_selector = QComboBox()
-        self.btn_replay_animation = QPushButton()
-        self.btn_reset = QPushButton()
-
-        replay_layout = QHBoxLayout()
-        replay_layout.addWidget(self.path_replay_selector)
-        replay_layout.addWidget(self.btn_replay_animation)
-
-        view_reset_buttons_layout.addWidget(self.btn_pan_mode)
-        view_reset_buttons_layout.addWidget(self.btn_reset_view)
-        view_reset_buttons_layout.addWidget(self.btn_show_path)
-        view_reset_buttons_layout.addWidget(self.btn_show_3d_view)
-        view_reset_buttons_layout.addWidget(self.btn_step_view)
-        view_reset_buttons_layout.addLayout(replay_layout)
-        view_reset_buttons_layout.addWidget(self.btn_reset)
-        group4_layout.addLayout(view_reset_buttons_layout)
-
-        # Right side for path checkboxes
-        self.path_selection_layout = QVBoxLayout()
-        group4_layout.addLayout(self.path_selection_layout)
-
-        main_controls_layout.addWidget(self.group_view_reset)
+        # --- Left side: Image display and controls ---
+        left_layout = QVBoxLayout()
+        self.image_label = YC_ImageLabel(self)
+        left_layout.addWidget(self.image_label, 1) # Set stretch factor to 1
 
         frame_nav_layout = QHBoxLayout()
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -314,17 +275,82 @@ class YC_VesselTracerApp(QMainWindow):
         self.frame_info_label = QLabel("Frame: -- / --")
         frame_nav_layout.addWidget(self.frame_slider)
         frame_nav_layout.addWidget(self.frame_info_label)
-        self.layout.addLayout(frame_nav_layout)
-
-        self.image_label = YC_ImageLabel(self)
-        self.layout.addWidget(self.image_label, 1)
+        left_layout.addLayout(frame_nav_layout)
 
         self.info_label = QLabel()
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         font = self.info_label.font()
         font.setPointSize(14)
         self.info_label.setFont(font)
-        self.layout.addWidget(self.info_label)
+        left_layout.addWidget(self.info_label)
+
+        self.layout.addLayout(left_layout, 1) # Set stretch factor to 1
+
+        # --- Right side: Control panels ---
+        right_controls_layout = QVBoxLayout()
+        right_controls_layout.setSpacing(15)
+
+        # Group 1: Load
+        self.group_load = QGroupBox()
+        group1_layout = QVBoxLayout(self.group_load)
+        self.btn_select_folder = QPushButton()
+        group1_layout.addWidget(self.btn_select_folder)
+        right_controls_layout.addWidget(self.group_load)
+
+        # Group 2: Configure
+        self.group_configure = QGroupBox()
+        group2_layout = QVBoxLayout(self.group_configure)
+        self.btn_add_noise_roi = QPushButton()
+        self.btn_smoothing_preview = QPushButton()
+        group2_layout.addWidget(self.btn_add_noise_roi)
+        group2_layout.addWidget(self.btn_smoothing_preview)
+        right_controls_layout.addWidget(self.group_configure)
+        self.group_tools = self.group_configure
+
+        # Group 3: Execute
+        self.group_execute = QGroupBox()
+        group3_layout = QVBoxLayout(self.group_execute)
+        self.btn_main_action = QPushButton()
+        group3_layout.addWidget(self.btn_main_action)
+        right_controls_layout.addWidget(self.group_execute)
+
+        # Group 4: View & Reset
+        self.group_view_reset = QGroupBox()
+        group4_layout = QVBoxLayout(self.group_view_reset)
+
+        self.btn_pan_mode = QPushButton()
+        self.btn_pan_mode.setCheckable(True)
+        self.btn_reset_view = QPushButton()
+        self.btn_show_path = QPushButton()
+        self.btn_show_3d_view = QPushButton()
+        self.btn_step_view = QPushButton()
+
+        replay_layout = QHBoxLayout()
+        self.path_replay_selector = QComboBox()
+        self.btn_replay_animation = QPushButton()
+        replay_layout.addWidget(self.path_replay_selector)
+        replay_layout.addWidget(self.btn_replay_animation)
+
+        self.path_selection_layout = QVBoxLayout()
+        self.path_selection_layout.setSpacing(5)
+
+        self.btn_reset = QPushButton()
+
+        group4_layout.addWidget(self.btn_pan_mode)
+        group4_layout.addWidget(self.btn_reset_view)
+        group4_layout.addWidget(self.btn_show_path)
+        group4_layout.addWidget(self.btn_show_3d_view)
+        group4_layout.addWidget(self.btn_step_view)
+        group4_layout.addLayout(replay_layout)
+        group4_layout.addLayout(self.path_selection_layout)
+        group4_layout.addWidget(self.btn_reset)
+        right_controls_layout.addWidget(self.group_view_reset)
+
+        right_controls_layout.addStretch(1) # Add stretch to push panels to the top
+
+        self.layout.addLayout(right_controls_layout)
+        self.layout.setStretchFactor(left_layout, 3) # Image layout takes 3/4 of space
+        self.layout.setStretchFactor(right_controls_layout, 1) # Controls layout takes 1/4 of space
 
         self.setStatusBar(QStatusBar(self))
 
@@ -346,6 +372,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.help_action = QAction(self)
         self.help_action.setShortcut("F1")
         self.introduction_action = QAction(self)
+        self.packaging_action = QAction(self)
 
 
     def create_menus(self):
@@ -364,6 +391,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.help_menu = menu_bar.addMenu("")
         self.help_menu.addAction(self.introduction_action)
         self.help_menu.addAction(self.help_action)
+
+        self.tools_menu = menu_bar.addMenu("")
+        self.tools_menu.addAction(self.packaging_action)
 
     def connect_signals(self):
         self.open_action.triggered.connect(self.select_folder)
@@ -390,6 +420,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
+        self.packaging_action.triggered.connect(self.handle_packaging_action)
 
     def update_ui_for_state(self):
         is_interactive = self.app_state != AppState.PROCESSING
@@ -925,6 +956,69 @@ class YC_VesselTracerApp(QMainWindow):
         # Restore the full path view after animation
         self.update_path_display()
         self.statusBar().showMessage("Animation finished.", 3000)
+
+    def handle_packaging_action(self):
+        if self.is_packaged:
+            self.check_for_updates()
+        else:
+            self.package_application()
+
+    def package_application(self):
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle(self.tr("package_action"))
+        msg_box.setText("開始打包應用程式。\n此過程可能需要數分鐘，請稍候。\n完成後會跳出提示。")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.show()
+        QApplication.processEvents()
+
+        try:
+            # Command to run PyInstaller
+            command = [
+                sys.executable, "-m", "PyInstaller", "main.py",
+                "--name", "YC_VesselTracer",
+                "--windowed",
+                "--add-data", f"src{os.pathsep}src",
+                "--hidden-import", "pytz",
+                "--noconfirm"
+            ]
+
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            stdout, stderr = process.communicate()
+
+            if process.returncode == 0:
+                QMessageBox.information(self, "打包成功", "應用程式已成功打包！\n請查看 'dist/YC_VesselTracer' 資料夾。")
+            else:
+                error_message = f"打包失敗！\n\n錯誤訊息:\n{stderr}"
+                error_dialog = YC_MarkdownDialog(f"```\n{error_message}\n```", self)
+                error_dialog.setWindowTitle("打包錯誤")
+                error_dialog.exec()
+
+        except Exception as e:
+            QMessageBox.critical(self, "打包錯誤", f"執行打包時發生未知錯誤：\n{e}")
+
+    def check_for_updates(self):
+        try:
+            # Fetch the latest info from the remote
+            subprocess.check_output(["git", "fetch"], stderr=subprocess.STDOUT)
+
+            # Get the commit hash of the local HEAD
+            local_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip()
+
+            # Get the commit hash of the remote main branch
+            remote_commit = subprocess.check_output(["git", "rev-parse", "origin/main"]).strip()
+
+            if local_commit == remote_commit:
+                QMessageBox.information(self, "檢查更新", "已是最新版本。")
+            else:
+                QMessageBox.information(self, "檢查更新", "發現系統已更新，請跟昱辰 or YC確認是否需要更新")
+
+        except subprocess.CalledProcessError as e:
+            # This can happen if git is not installed, or this is not a git repository
+            QMessageBox.warning(self, "更新錯誤", f"無法檢查更新。請確認您已安裝 Git，且此應用程式位於一個 Git 倉庫中。\n\n錯誤: {e.output.decode()}")
+        except FileNotFoundError:
+            QMessageBox.warning(self, "更新錯誤", "無法檢查更新。請確認您已安裝 Git 並將其加入系統路徑中。")
+        except Exception as e:
+            QMessageBox.critical(self, "更新錯誤", f"檢查更新時發生未知錯誤：\n{e}")
 
     def closeEvent(self, event):
         self.reset_system()
