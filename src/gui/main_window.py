@@ -63,16 +63,18 @@ class YC_VesselTracerApp(QMainWindow):
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
         self.noise_rois: List[QRect] = []
-        self.drawing_mode: Optional[DrawingMode] = None
+        self.drawing_mode: DrawingMode = DrawingMode.MARKING
         self.final_paths: Optional[List[List[Tuple[int, int]]]] = None
         self.alternative_paths: Optional[List[List[Tuple[int, int]]]] = None
         self.final_path_image: Optional[np.ndarray] = None
+        self.final_path_base_image: Optional[np.ndarray] = None
         self.base_mask_projection: Optional[np.ndarray] = None
         self.temporal_cost_map: Optional[np.ndarray] = None
         self.current_frame_index: int = 0
         self.path_points_info: List[Dict[str, Any]] = []
         self.app_state: AppState = AppState.IDLE
         self.smoothing_level: int = 4
+        self.visible_paths: List[bool] = []
 
         self.init_ui()
         self.create_actions()
@@ -802,17 +804,35 @@ class YC_VesselTracerApp(QMainWindow):
 
     def reset_system(self):
         self.images = []
+        self.global_background_color = 255
         self.vessel_masks = None
+        self.layered_vessel_mask = None
+        self.vessel_identity_map = None
         self.noise_rois = []
+        self.drawing_mode = DrawingMode.MARKING
         self.final_paths = None
+        self.alternative_paths = None
+        self.final_path_image = None
+        self.final_path_base_image = None
+        self.base_mask_projection = None
+        self.temporal_cost_map = None
         self.path_points_info = []
         self.smoothing_level = 4
+        self.visible_paths = []
         self.params = self.DEFAULT_PARAMS.copy()
+
+        # Clear path selection checkboxes
+        while self.path_selection_layout.count():
+            child = self.path_selection_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
         self.image_label.setPixmap(QPixmap())
         self.frame_slider.setRange(0, 0)
         self.frame_info_label.setText("Frame: -- / --")
         self.app_state = AppState.IDLE
         self.update_ui_for_state()
+        self.image_label.reset_zoom()
 
     def show_help_dialog(self):
         param_meta = {
