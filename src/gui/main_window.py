@@ -977,7 +977,8 @@ class YC_VesselTracerApp(QMainWindow):
                 sys.executable, "-m", "PyInstaller", "main.py",
                 "--name", "YC_VesselTracer",
                 "--windowed",
-                "--add-data", f"src{os.pathsep}src",
+                "--collect-all", "skimage",
+                "--collect-all", "plotly",
                 "--hidden-import", "pytz",
                 "--noconfirm"
             ]
