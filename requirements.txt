@@ -5,3 +5,5 @@ numpy
 scikit-image
 scikit-learn
 plotly
+pyinstaller
+Pillow

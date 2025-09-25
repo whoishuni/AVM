@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QProgressDialog, QSlider, QDialog, QGroupBox, QStyle,
     QCheckBox, QComboBox
 )
-from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence
+from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence, QIcon
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
 
 # --- Project-specific Imports ---
@@ -30,10 +30,11 @@ from core.image_processing import (
 from core.pathfinding import find_path_astar
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
-    convert_np_to_pixmap, AppState, DrawingMode
+    convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
 )
 from utils.threading import ProgressUpdater
 import plotly.graph_objects as go
+import subprocess
 
 class YC_VesselTracerApp(QMainWindow):
     """The main application window for the YC 2D vessel tracing tool."""
@@ -51,10 +52,16 @@ class YC_VesselTracerApp(QMainWindow):
         super().__init__()
         self.language = language
         self.translations = self.get_translations()
+        # Check if running as a bundled executable
+        self.is_packaged = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 
         self.params = self.DEFAULT_PARAMS.copy()
         self.setWindowTitle(self.tr("app_title"))
         self.setGeometry(100, 100, 1280, 960)
+
+        # Set window icon dynamically
+        self.setWindowIcon(create_yc_icon())
+
         self.set_stylesheet()
 
         self.images: List[np.ndarray] = []
@@ -94,9 +101,10 @@ class YC_VesselTracerApp(QMainWindow):
                 "draw_noise": "Draw Noise Area", "adjust_smoothing": "Adjust Smoothing",
                 "preview_mask": "Preview Mask", "show_3d_view": "Show 3D View",
                 "view_steps": "View Steps", "file_menu": "&File", "edit_menu": "&Edit",
-                "view_menu": "&View", "help_menu": "&Help",
+                "view_menu": "&View", "help_menu": "&Help", "tools_menu": "&Tools",
                 "open_folder_action": "&Open Folder...", "reset_action": "&Reset",
                 "exit_action": "E&xit", "parameters_action": "&Parameters...",
+                "package_action": "Package Application", "update_action": "Check for Updates",
                 "zoom_in_action": "Zoom &In", "zoom_out_action": "Zoom &Out",
                 "reset_zoom_action": "Reset &Zoom", "controls_action": "&Controls & Parameters...",
                 "group_load": "Step 1: Load Images", "group_configure": "Step 2: Mark & Configure",
@@ -112,7 +120,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "pan_mode": "Pan Tool", "reset_view": "Reset View", "replay_animation": "Replay Animation",
                 "introduction": "Introduction",
                 "param_bg_removal_offset_desc": "Offset for adaptive thresholding to remove background. Higher values remove more background but may clip vessels.",
-                "param_bg_removal_kernel_size": "Size of the kernel for background estimation. Must be an odd number. Larger values handle uneven lighting better.",
+                "param_bg_removal_kernel_desc": "Size of the kernel for background estimation. Must be an odd number. Larger values handle uneven lighting better.",
                 "param_max_node_search_radius_desc": "The maximum distance (in pixels) to search for a vessel segment when a point is clicked.",
                 "param_max_gap_bridge_distance_desc": "The maximum gap size (in pixels) the pathfinder will attempt to bridge between vessel segments.",
                 "param_forbidden_zone_radius_desc": "Radius around a path start/end point where the pathfinder cannot re-enter, preventing loops.",
@@ -135,8 +143,9 @@ class YC_VesselTracerApp(QMainWindow):
                 "view_steps": "查看步驟", "pan_mode": "平移工具", "reset_view": "重置視圖",
                 "replay_animation": "重播動畫", "introduction": "介紹",
                 "file_menu": "檔案 (&F)", "edit_menu": "編輯 (&E)",
-                "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)",
+                "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)", "tools_menu": "工具 (&T)",
                 "open_folder_action": "開啟資料夾 (&O)...", "reset_action": "重置 (&R)",
+                "package_action": "一鍵打包", "update_action": "檢查更新",
                 "exit_action": "離開 (&X)", "parameters_action": "參數設定 (&P)...",
                 "zoom_in_action": "放大 (&I)", "zoom_out_action": "縮小 (&O)",
                 "reset_zoom_action": "重置縮放 (&Z)", "controls_action": "控制與參數說明 (&C)...",
@@ -151,7 +160,7 @@ class YC_VesselTracerApp(QMainWindow):
                 "info_done": "路徑分析完成！點擊 '全部重置' 來開始新的分析。",
                 "info_drawing_noise": "在影像上拖動滑鼠以繪製要排除的雜訊區域。",
                 "param_bg_removal_offset_desc": "用於自適應閾值以去除背景的偏移量。值越高，去除的背景越多，但可能會裁切到血管。",
-                "param_bg_removal_kernel_size": "用於背景估計的核心大小。必須是奇數。較大的值能更好地處理不均勻光照。",
+                "param_bg_removal_kernel_desc": "用於背景估計的核心大小。此數值必須為奇數。較大的值可以更好地處理不均勻的光照。",
                 "param_max_node_search_radius_desc": "點擊標記點時，在血管遮罩上搜尋對應像素點的最大半徑（單位：像素）。",
                 "param_max_gap_bridge_distance_desc": "路徑尋找演算法能夠連接的血管片段之間的最大間隙（單位：像素）。",
                 "param_forbidden_zone_radius_desc": "環繞路徑起點/終點的區域半徑，禁止路徑重新進入此區域以防止產生迴圈。",
@@ -199,6 +208,13 @@ class YC_VesselTracerApp(QMainWindow):
         self.edit_menu.setTitle(self.tr("edit_menu"))
         self.view_menu.setTitle(self.tr("view_menu"))
         self.help_menu.setTitle(self.tr("help_menu"))
+        self.tools_menu.setTitle(self.tr("tools_menu"))
+
+        if self.is_packaged:
+            self.packaging_action.setText(self.tr("update_action"))
+        else:
+            self.packaging_action.setText(self.tr("package_action"))
+
         self.update_ui_for_state()
 
     def show_introduction_dialog(self):
@@ -360,6 +376,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.help_action = QAction(self)
         self.help_action.setShortcut("F1")
         self.introduction_action = QAction(self)
+        self.packaging_action = QAction(self)
 
 
     def create_menus(self):
@@ -378,6 +395,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.help_menu = menu_bar.addMenu("")
         self.help_menu.addAction(self.introduction_action)
         self.help_menu.addAction(self.help_action)
+
+        self.tools_menu = menu_bar.addMenu("")
+        self.tools_menu.addAction(self.packaging_action)
 
     def connect_signals(self):
         self.open_action.triggered.connect(self.select_folder)
@@ -404,6 +424,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
+        self.packaging_action.triggered.connect(self.handle_packaging_action)
 
     def update_ui_for_state(self):
         is_interactive = self.app_state != AppState.PROCESSING
@@ -939,6 +960,72 @@ class YC_VesselTracerApp(QMainWindow):
         # Restore the full path view after animation
         self.update_path_display()
         self.statusBar().showMessage("Animation finished.", 3000)
+
+    def handle_packaging_action(self):
+        if self.is_packaged:
+            self.check_for_updates()
+        else:
+            self.package_application()
+
+    def package_application(self):
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle(self.tr("package_action"))
+        msg_box.setText("開始打包應用程式。\n此過程可能需要數分鐘，請稍候。\n完成後會跳出提示。")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.show()
+        QApplication.processEvents()
+
+        try:
+            # Command to run PyInstaller
+            command = [
+                sys.executable, "-m", "PyInstaller", "main.py",
+                "--name", "YC_VesselTracer",
+                "--windowed",
+                "--paths", "src",
+                "--collect-all", "skimage",
+                "--collect-all", "plotly",
+                "--hidden-import", "pytz",
+                "--exclude-module", "PyQt5",
+                "--noconfirm"
+            ]
+
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            stdout, stderr = process.communicate()
+
+            if process.returncode == 0:
+                QMessageBox.information(self, "打包成功", "應用程式已成功打包！\n請查看 'dist/YC_VesselTracer' 資料夾。")
+            else:
+                error_message = f"打包失敗！\n\n錯誤訊息:\n{stderr}"
+                error_dialog = YC_MarkdownDialog(f"```\n{error_message}\n```", self)
+                error_dialog.setWindowTitle("打包錯誤")
+                error_dialog.exec()
+
+        except Exception as e:
+            QMessageBox.critical(self, "打包錯誤", f"執行打包時發生未知錯誤：\n{e}")
+
+    def check_for_updates(self):
+        try:
+            # Fetch the latest info from the remote
+            subprocess.check_output(["git", "fetch"], stderr=subprocess.STDOUT)
+
+            # Get the commit hash of the local HEAD
+            local_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip()
+
+            # Get the commit hash of the remote main branch
+            remote_commit = subprocess.check_output(["git", "rev-parse", "origin/main"]).strip()
+
+            if local_commit == remote_commit:
+                QMessageBox.information(self, "檢查更新", "已是最新版本。")
+            else:
+                QMessageBox.information(self, "檢查更新", "發現系統已更新，請跟昱辰 or YC確認是否需要更新")
+
+        except subprocess.CalledProcessError as e:
+            # This can happen if git is not installed, or this is not a git repository
+            QMessageBox.warning(self, "更新錯誤", f"無法檢查更新。請確認您已安裝 Git，且此應用程式位於一個 Git 倉庫中。\n\n錯誤: {e.output.decode()}")
+        except FileNotFoundError:
+            QMessageBox.warning(self, "更新錯誤", "無法檢查更新。請確認您已安裝 Git 並將其加入系統路徑中。")
+        except Exception as e:
+            QMessageBox.critical(self, "更新錯誤", f"檢查更新時發生未知錯誤：\n{e}")
 
     def closeEvent(self, event):
         self.reset_system()
