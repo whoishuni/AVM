@@ -336,9 +336,9 @@ class YC_VesselTracerApp(QMainWindow):
 
         right_controls_layout.addStretch(1) # Add stretch to push panels to the top
 
-        self.layout.addLayout(right_controls_layout, 0) # Stretch factor 0 for fixed width
-        self.layout.setStretchFactor(0, 3) # Image layout (index 0) takes 3/4 of space
-        self.layout.setStretchFactor(1, 1) # Controls layout (index 1) takes 1/4 of space
+        self.layout.addLayout(right_controls_layout)
+        self.layout.setStretchFactor(left_layout, 3) # Image layout takes 3/4 of space
+        self.layout.setStretchFactor(right_controls_layout, 1) # Controls layout takes 1/4 of space
 
         self.setStatusBar(QStatusBar(self))
 
