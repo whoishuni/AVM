@@ -988,7 +988,8 @@ class YC_VesselTracerApp(QMainWindow):
                 "--collect-all", "plotly",
                 "--hidden-import", "pytz",
                 "--exclude-module", "PyQt5",
-                "--noconfirm"
+                "--noconfirm",
+                "--additional-hooks-dir", "../../hooks"  # <-- Added the directory name here
             ]
 
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
