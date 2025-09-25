@@ -1,103 +1,108 @@
-# 2D Vessel Tracer
+# YC_VesselTracer: 2D 血管路徑追蹤工具
 
-This application is a desktop tool for semi-automatically tracing paths in 2D angiography image sequences. It's designed to help identify and delineate vessel structures, like blood vessels, through a series of images captured over time.
+本應用程式為一桌面工具，用於半自動化追蹤 2D 血管攝影影像序列中的路徑，目的在於協助使用者識別並描繪影像中的血管結構。
 
-The key feature of this tool is its "vessel memory" system. Instead of just looking at a single flattened image, the software analyzes the image sequence frame by frame to understand how vessels grow and connect. This allows for more accurate pathfinding, preventing the algorithm from making incorrect jumps at intersections where one vessel overlaps another.
+此工具的關鍵功能為其「血管記憶」系統。軟體會逐幀分析影像序列，以理解血管隨時間的生長與連接模式。此方法旨在提高路徑尋找的準確性，特別是在血管交叉或重疊的區域，避免演算法跳轉至不相關的血管。
 
-## Features
+## 功能
 
-- **Image Sequence Loading**: Load a folder of images (JPG, PNG, etc.) that represent a time series.
-- **Interactive Path Marking**: Click on the image to define start, middle, and end points for the vessel path you want to trace.
-- **Vessel Memory Pathfinding**: A sophisticated A* pathfinding algorithm that uses temporal information to trace the most likely vessel path, avoiding jumps to unrelated overlapping vessels.
-- **Noise Reduction**:
-    - Interactively draw rectangular areas to exclude noise from the analysis.
-    - Automatically removes large, bright areas that are not part of the vessel structure.
-- **Adjustable Smoothing**: Interactively preview and set the level of Gaussian smoothing to apply before analysis.
-- **Step-by-Step Visualization**: View the entire image processing and analysis pipeline, from filtering to the final path, to understand how the result was generated.
+- **影像序列載入**: 支援載入包含多張影像（如 JPG, PNG 格式）的資料夾，並將其作為時間序列進行分析。
+- **互動式路徑標記**: 允許使用者透過在影像上點擊，定義欲追蹤路徑的起點、中途點和終點。
+- **血管記憶尋路演算法**: 採用 A* 尋路演算法，該演算法利用時間序列資訊來追蹤血管路徑，以避免在重疊結構處發生跳轉。
+- **雜訊抑制**:
+    - **手動降噪**: 提供繪製矩形區域的功能，將特定區域排除於分析之外。
+    - **自動過濾**: 自動識別並移除影像中與血管結構無關的大面積高亮區域。
+- **可調式影像平滑**: 提供即時預覽介面，以互動方式調整高斯平滑的強度。
+- **視覺化分析流程**: 提供逐步的視覺化功能，展示從影像過濾、遮罩生成到最終路徑規劃的流程。
 
-## Technical Details
+## 技術細節
 
-This tool employs a sophisticated, multi-stage process to accurately identify and trace vessel paths. For developers looking to understand the core logic, the key components are outlined below.
+本工具採用多階段的處理流程來識別與追蹤血管路徑。
 
-### 1. Vessel Enhancement and Masking
+### 階段一：血管增強與遮罩生成
 
-Before pathfinding can occur, the vessels must be clearly segmented from the background. This is achieved through a pipeline designed to handle noise and enhance tubular structures:
+在路徑尋找前，需先將血管從背景中分割出來。此流程包含以下步驟：
 
-- **Preprocessing**: Large, bright, non-vessel artifacts (like catheters or bone structures) are identified using morphological operations and removed from the image.
-- **Vessel Filtering**: The core of vessel enhancement relies on a combination of three specialized filters from `scikit-image`:
-    - **Frangi**: Detects vessel-like structures based on the Hessian matrix eigenvalues. It's excellent at identifying vessels of varying sizes.
-    - **Sato**: Another Hessian-based filter that is also effective for detecting lines and tubes.
-    - **Meijering**: A filter that is less sensitive to noise and provides a good baseline response.
-- **Response Combination**: The responses from all three filters are combined by taking the pixel-wise maximum. This creates a robust "vesselness" map that leverages the strengths of each filter.
-- **Binarization and Post-processing**: The combined response map is thresholded to create a binary mask. Finally, a custom gap-bridging algorithm connects small, disconnected segments by finding and linking the endpoints of their skeletons.
+1.  **預處理 - 雜訊過濾**:
+    *   利用形態學操作識別影像中非血管的大型高亮物體（如導管或骨骼），並將其從後續分析中移除。
 
-### 2. Pathfinding with a Custom A* Algorithm
+2.  **血管濾波**:
+    *   結合 `scikit-image` 函式庫中的三種濾波器（Frangi, Sato, Meijering）來強化血管結構。
+    *   **響應結合**: 計算三種濾波器的輸出，並在每個像素點上取其最大值，以產生一個「血管可能性」（Vesselness）圖。
 
-The pathfinding is not a simple search on an image. It uses a custom A* algorithm with a unique cost function to find the most "natural" path between user-defined points. The total cost to move to a neighboring pixel is a weighted sum of several factors:
+3.  **二值化與後處理**:
+    *   將「血管可能性」圖進行閾值處理，轉換成二值遮罩。
+    *   執行一個斷連彌合演算法，此演算法會先對二值遮罩進行骨架化，然後偵測並連接骨架中的斷點。
 
-- **Path Coherence Map (Pre-analysis)**: When the user marks the *first* point, a Dijkstra-like search is performed in the background. This search calculates a "cost" based on path incoherence (penalizing turns and brightness changes). The resulting cost map is inverted to create a **Path Coherence Map**, where high values indicate a smooth, continuous path from the start point. This map is the most heavily weighted component in the final A* search, strongly guiding the path along the most likely main vessel trunk.
-- **Temporal Cost**: The cost of a pixel is proportional to the frame number in which it appears. This encourages the path to stay within vessels that appear early and persist through the image sequence, preventing it from jumping to vessels that appear in much later frames.
-- **Vessel Identity Penalty**: The application builds a **Vessel Identity Map** that assigns a unique ID to each continuous vessel segment across all frames. The A* algorithm incurs a very high penalty for jumping from a pixel with one ID to a pixel with a different ID, effectively forcing it to stay within a single, connected vessel structure.
-- **Local Turn Penalty**: A standard turn penalty based on the cosine similarity between the incoming and outgoing vectors is still used to ensure local path smoothness.
+### 階段二：A* 尋路演算法
 
-This multi-faceted approach allows the algorithm to make intelligent decisions at complex intersections, preferring to follow a single, coherent vessel through time rather than simply taking the shortest spatial path.
+本工具的路徑尋找採用 A* 演算法，其成本函數由以下幾個因素加權計算而成：
 
-## Setup and Installation
+1.  **路徑一致性圖 (Path Coherence Map)**:
+    *   當使用者標記第一個點時，系統會在背景執行一次 Dijkstra 搜尋，其成本基於路徑的曲折程度和亮度變化。
+    *   搜尋完成後，成本圖會被反轉，形成一張路徑一致性圖。此圖在 A* 搜尋中佔有較高權重。
 
-This application is built with Python and requires several common scientific and GUI libraries.
+2.  **時間成本 (Temporal Cost)**:
+    *   一個像素點的成本與其首次出現的影像幀數成正比，此機制鼓勵路徑停留在較早出現的血管中。
 
-### Prerequisites
+3.  **血管身份懲罰 (Vessel Identity Penalty)**:
+    *   系統會建立一張血管身份圖 (Vessel Identity Map)，為每個連續的血管片段分配一個獨立 ID。
+    *   當 A* 演算法的搜尋路徑從一個 ID 的像素跳到另一個不同 ID 的像素時，會產生較高的懲罰。
+
+4.  **局部轉彎懲罰 (Local Turn Penalty)**:
+    *   演算法包含一個基於路徑前進方向向量的餘弦相似度計算的轉彎懲罰，以確保路徑的局部平滑性。
+
+## 設定與安裝
+
+本應用程式使用 Python 開發。
+
+### 環境需求
 
 - Python 3.6+
 
-### Dependencies
+### 依賴套件
 
-The required Python libraries are:
-- `PyQt5`: For the graphical user interface.
-- `opencv-python`: For core image processing functions.
-- `numpy`: For numerical operations and image array manipulation.
-- `scikit-image`: For advanced image filtering and morphology (Frangi, Sato, skeletonize).
-- `scikit-learn`: (Implicit dependency, good to have).
+- `PyQt6`
+- `opencv-python`
+- `numpy`
+- `scikit-image`
+- `plotly`
+- `PyQt6-WebEngine`
 
-You can install all required dependencies using pip:
+可使用 pip 安裝所有依賴：
 
 ```bash
-pip install PyQt5 opencv-python numpy scikit-image scikit-learn
+pip install PyQt6 opencv-python numpy scikit-image plotly PyQt6-WebEngine
 ```
 
-## How to Use
+## 使用指南
 
-1.  **Run the Application**: Execute the `baseline.py` script from your terminal:
+1.  **執行應用程式**:
+    在終端機中執行 `main.py` 腳本：
     ```bash
-    python baseline.py
+    python main.py
     ```
+    應用程式啟動時會提示選擇語言。
 
-2.  **Step 1: Load Images**
-    - Click the **"Select Image Folder"** button.
-    - Navigate to and select the directory containing your image sequence. The images will be loaded and sorted automatically.
-    - The first frame will be displayed. You can navigate through the frames using the **slider** or the **'A' (previous) and 'D' (next) keys**.
+2.  **步驟一：載入影像**
+    - 點擊 **"選擇圖片資料夾"** 按鈕。
+    - 選擇存放影像序列的資料夾。
+    - 可使用 **滑桿** 或 **'A' / 'D' 按鍵** 瀏覽影像。
 
-3.  **Step 2: Mark Path Points**
-    - The application will now say "Start Marking Path". Click this button to enter marking mode.
-    - Click on the image to place points along the vessel you wish to trace. You must define at least a start and an end point.
-    - You can place points on different frames by navigating with the slider or A/D keys.
-    - Once you have at least two points, click **"Confirm Points"**. The view will update to a Maximum Intensity Projection of the frame range you selected.
+3.  **步驟二：標記路徑點**
+    - 點擊 **"開始標記路徑"** 按鈕。
+    - 在影像上點擊以放置標記點，至少需定義一個起點和一個終點。
+    - 標記至少兩個點後，點擊 **"確認標記點"**。
 
-4.  **Step 3: Configure and Analyze**
-    - After confirming points, a new set of tools will appear.
-    - **(Optional) Adjust Smoothing**: Click **"Adjust Smoothing"** to open a live preview dialog. Use the slider to find a setting that makes the vessels clear without losing detail.
-    - **(Optional) Draw Noise Area**: Click **"Draw Noise Area"**. Then, click and drag on the image to draw a red box around any area you want the algorithm to ignore. You can add multiple noise areas.
-    - **Run Analysis**: When you are ready, click **"Run Full Analysis"**.
+4.  **步驟三：設定與分析**
+    - **(可選) 調整平滑度**: 點擊 **"調整平滑度"** 開啟預覽對話框以調整設定。
+    - **(可選) 繪製雜訊區域**: 點擊 **"繪製雜訊區域"**，在影像上拖曳以繪製矩形框。
+    - 點擊 **"執行完整分析"**。
 
-5.  **Step 4: View Results**
-    - A progress bar will appear while the analysis runs.
-    - After processing, a **"Processing Step Viewer"** dialog will automatically open.
-    - Use the **"Next"** and **"Previous"** buttons to see each step of the analysis, including:
-        - Filtering and masking.
-        - The colored **Vessel Identity Map**, which shows how the "memory" feature has grouped vessel segments.
-        - The final A* path drawn on the vessel mask.
-        - The final result with the path overlayed on the original image.
-    - Close the step viewer to see the final image in the main window.
+5.  **步驟四：檢視結果**
+    - 分析完成後，**"處理步驟檢視器"** 對話框將自動開啟。
+    - 使用 **"下一步"** 和 **"上一步"** 按鈕檢視分析過程中的每一步。
+    - 可點擊 **"顯示3D視圖"** 從三維空間觀察血管結構與路徑。
 
-6.  **Reset**
-    - To start a new analysis, click the **"Reset All"** button. This will clear all data and return the application to its initial state.
+6.  **重置**
+    - 點擊 **"全部重置"** 按鈕以清除所有資料並恢復初始狀態。
