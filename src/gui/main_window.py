@@ -1,4 +1,5 @@
 import sys
+import os
 import numpy as np
 import cv2
 from typing import List, Optional, Tuple, Dict, Any
@@ -7,7 +8,8 @@ from typing import List, Optional, Tuple, Dict, Any
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QFileDialog, QLabel, QStatusBar, QMainWindow, QMessageBox,
-    QSizePolicy, QProgressDialog, QSlider, QDialog, QGroupBox, QStyle
+    QSizePolicy, QProgressDialog, QSlider, QDialog, QGroupBox, QStyle,
+    QCheckBox
 )
 from PyQt6.QtGui import QPixmap, QFont, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
@@ -19,6 +21,7 @@ from gui.step_viewer_dialog import YC_StepViewerDialog
 from gui.plotly_viewer_dialog import YC_PlotlyViewerDialog
 from gui.help_dialog import YC_HelpDialog
 from gui.parameter_dialog import YC_ParameterDialog
+from gui.markdown_dialog import YC_MarkdownDialog
 from core.image_processing import (
     create_enhanced_vessel_masks, create_maximum_intensity_projection,
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
@@ -103,6 +106,8 @@ class YC_VesselTracerApp(QMainWindow):
                 "info_processing": "Running analysis, please wait...",
                 "info_done": "Path analysis is complete! Reset to start a new analysis.",
                 "info_drawing_noise": "Drag the mouse on the image to draw a noise area to exclude.",
+                "pan_mode": "Pan Tool", "reset_view": "Reset View", "replay_animation": "Replay Animation",
+                "introduction": "Introduction",
                 "param_bg_removal_offset_desc": "Offset for adaptive thresholding to remove background. Higher values remove more background but may clip vessels.",
                 "param_bg_removal_kernel_size": "Size of the kernel for background estimation. Must be an odd number. Larger values handle uneven lighting better.",
                 "param_max_node_search_radius_desc": "The maximum distance (in pixels) to search for a vessel segment when a point is clicked.",
@@ -124,7 +129,9 @@ class YC_VesselTracerApp(QMainWindow):
                 "processing": "處理中...", "reset_all": "全部重置",
                 "draw_noise": "繪製雜訊區域", "adjust_smoothing": "調整平滑度",
                 "preview_mask": "預覽遮罩", "show_3d_view": "顯示3D視圖",
-                "view_steps": "查看步驟", "file_menu": "檔案 (&F)", "edit_menu": "編輯 (&E)",
+                "view_steps": "查看步驟", "pan_mode": "平移工具", "reset_view": "重置視圖",
+                "replay_animation": "重播動畫", "introduction": "介紹",
+                "file_menu": "檔案 (&F)", "edit_menu": "編輯 (&E)",
                 "view_menu": "檢視 (&V)", "help_menu": "幫助 (&H)",
                 "open_folder_action": "開啟資料夾 (&O)...", "reset_action": "重置 (&R)",
                 "exit_action": "離開 (&X)", "parameters_action": "參數設定 (&P)...",
@@ -142,17 +149,17 @@ class YC_VesselTracerApp(QMainWindow):
                 "info_drawing_noise": "在影像上拖動滑鼠以繪製要排除的雜訊區域。",
                 "param_bg_removal_offset_desc": "用於自適應閾值以去除背景的偏移量。值越高，去除的背景越多，但可能會裁切到血管。",
                 "param_bg_removal_kernel_size": "用於背景估計的核心大小。必須是奇數。較大的值能更好地處理不均勻光照。",
-                "param_max_node_search_radius_desc": "點擊某個點時，搜尋血管片段的最大距離（以像素為單位）。",
-                "param_max_gap_bridge_distance_desc": "路徑尋找器將嘗試橋接的血管片段之間的最大間隙大小（以像素為單位）。",
-                "param_forbidden_zone_radius_desc": "路徑起點/終點周圍的半徑，路徑尋找器不能重新進入該區域，以防止循環。",
-                "param_time_cost_weight_desc": "在幀（時間）之間移動的成本的權重乘數。較高的值偏好在時間上更短的路徑。",
-                "param_pathfinding_obstacle_cost_desc": "被視為障礙的像素的絕對成本。應該是一個非常大的數字。",
-                "param_turn_penalty_weight_desc": "轉彎時應用的懲罰。較高的值會產生更直的路徑。",
-                "param_dynamic_cost_weight_desc": "動態增加到路徑的成本的乘數，以不鼓勵為替代路徑重複使用相同的像素。",
-                "param_straight_path_threshold_desc": "用於判斷路徑片段是否為「直線」的餘弦相似度閾值。用於懲罰轉彎。",
-                "param_cross_vessel_penalty_desc": "當路徑根據身份圖跨越到不同的血管時，應用的巨大懲罰。",
-                "param_main_vessel_width_tolerance_desc": "側枝寬度與主血管寬度可以偏離的容差（百分比）。",
-                "param_side_branch_turn_penalty_multiplier_desc": "當路徑正在探索潛在的側枝時，專門為轉彎懲罰應用的乘數。"
+                "param_max_node_search_radius_desc": "點擊標記點時，在血管遮罩上搜尋對應像素點的最大半徑（單位：像素）。",
+                "param_max_gap_bridge_distance_desc": "路徑尋找演算法能夠連接的血管片段之間的最大間隙（單位：像素）。",
+                "param_forbidden_zone_radius_desc": "環繞路徑起點/終點的區域半徑，禁止路徑重新進入此區域以防止產生迴圈。",
+                "param_time_cost_weight_desc": "跨幀移動（時間維度）的成本權重。較高的值會傾向於選擇在時間上（幀數）更短的路徑。",
+                "param_pathfinding_obstacle_cost_desc": "被視為障礙物的像素的絕對成本。應設為極大值以阻止路徑穿越。",
+                "param_turn_penalty_weight_desc": "對路徑轉彎處施加的懲罰。值越高，產生的路徑越趨於直線。",
+                "param_dynamic_cost_weight_desc": "為已走過的路徑動態增加的成本權重，用於在尋找替代路徑時避免重複。",
+                "param_straight_path_threshold_desc": "用於判斷一段路徑是否為「直線」的餘弦相似度閾值，主要用於計算轉彎懲罰。",
+                "param_cross_vessel_penalty_desc": "當路徑根據血管身份圖（Identity Map）跨越到不同血管時所施加的高額懲罰。",
+                "param_main_vessel_width_tolerance_desc": "側枝血管寬度與主血管寬度的允許偏差容忍度（百分比）。",
+                "param_side_branch_turn_penalty_multiplier_desc": "當路徑探索潛在的側枝時，對轉彎懲罰應用的特定乘數。"
             }
         }
         return translations
@@ -172,7 +179,10 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_show_path.setText(self.tr("preview_mask"))
         self.btn_show_3d_view.setText(self.tr("show_3d_view"))
         self.btn_step_view.setText(self.tr("view_steps"))
+        self.btn_replay_animation.setText(self.tr("replay_animation"))
         self.btn_reset.setText(self.tr("reset_all"))
+        self.btn_pan_mode.setText(self.tr("pan_mode"))
+        self.btn_reset_view.setText(self.tr("reset_view"))
         self.open_action.setText(self.tr("open_folder_action"))
         self.reset_action.setText(self.tr("reset_action"))
         self.exit_action.setText(self.tr("exit_action"))
@@ -181,11 +191,18 @@ class YC_VesselTracerApp(QMainWindow):
         self.zoom_out_action.setText(self.tr("zoom_out_action"))
         self.reset_zoom_action.setText(self.tr("reset_zoom_action"))
         self.help_action.setText(self.tr("controls_action"))
+        self.introduction_action.setText(self.tr("introduction"))
         self.file_menu.setTitle(self.tr("file_menu"))
         self.edit_menu.setTitle(self.tr("edit_menu"))
         self.view_menu.setTitle(self.tr("view_menu"))
         self.help_menu.setTitle(self.tr("help_menu"))
         self.update_ui_for_state()
+
+    def show_introduction_dialog(self):
+        # Assumes README.md is in the root directory, one level up from src
+        readme_path = os.path.join(os.path.dirname(__file__), '..', '..', 'README.md')
+        dialog = YC_MarkdownDialog(os.path.abspath(readme_path), self)
+        dialog.exec()
 
     def set_stylesheet(self):
         style = """
@@ -256,14 +273,30 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.group_view_reset = QGroupBox()
         group4_layout = QHBoxLayout(self.group_view_reset)
+
+        # Left side for buttons
+        view_reset_buttons_layout = QVBoxLayout()
+        self.btn_pan_mode = QPushButton()
+        self.btn_pan_mode.setCheckable(True)
+        self.btn_reset_view = QPushButton()
         self.btn_show_path = QPushButton()
         self.btn_show_3d_view = QPushButton()
         self.btn_step_view = QPushButton()
+        self.btn_replay_animation = QPushButton()
         self.btn_reset = QPushButton()
-        group4_layout.addWidget(self.btn_show_path)
-        group4_layout.addWidget(self.btn_show_3d_view)
-        group4_layout.addWidget(self.btn_step_view)
-        group4_layout.addWidget(self.btn_reset)
+        view_reset_buttons_layout.addWidget(self.btn_pan_mode)
+        view_reset_buttons_layout.addWidget(self.btn_reset_view)
+        view_reset_buttons_layout.addWidget(self.btn_show_path)
+        view_reset_buttons_layout.addWidget(self.btn_show_3d_view)
+        view_reset_buttons_layout.addWidget(self.btn_step_view)
+        view_reset_buttons_layout.addWidget(self.btn_replay_animation)
+        view_reset_buttons_layout.addWidget(self.btn_reset)
+        group4_layout.addLayout(view_reset_buttons_layout)
+
+        # Right side for path checkboxes
+        self.path_selection_layout = QVBoxLayout()
+        group4_layout.addLayout(self.path_selection_layout)
+
         main_controls_layout.addWidget(self.group_view_reset)
 
         frame_nav_layout = QHBoxLayout()
@@ -303,6 +336,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.reset_zoom_action.setShortcut("Ctrl+0")
         self.help_action = QAction(self)
         self.help_action.setShortcut("F1")
+        self.introduction_action = QAction(self)
+
 
     def create_menus(self):
         menu_bar = self.menuBar()
@@ -318,6 +353,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.view_menu.addAction(self.zoom_out_action)
         self.view_menu.addAction(self.reset_zoom_action)
         self.help_menu = menu_bar.addMenu("")
+        self.help_menu.addAction(self.introduction_action)
         self.help_menu.addAction(self.help_action)
 
     def connect_signals(self):
@@ -329,6 +365,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.zoom_out_action.triggered.connect(self.image_label.zoom_out)
         self.reset_zoom_action.triggered.connect(self.image_label.reset_zoom)
         self.help_action.triggered.connect(self.show_help_dialog)
+        self.introduction_action.triggered.connect(self.show_introduction_dialog)
 
         self.btn_select_folder.clicked.connect(self.select_folder)
         self.btn_main_action.clicked.connect(self.handle_main_action)
@@ -338,6 +375,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_show_path.clicked.connect(self.show_segmented_path_preview)
         self.btn_show_3d_view.clicked.connect(self.show_3d_view)
         self.btn_step_view.clicked.connect(self.show_step_viewer)
+        self.btn_replay_animation.clicked.connect(self.replay_path_animation)
+        self.btn_pan_mode.clicked.connect(self.toggle_pan_mode)
+        self.btn_reset_view.clicked.connect(self.image_label.reset_zoom)
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
@@ -363,7 +403,8 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.statusBar().showMessage(self.tr(config.get("status_key", "Ready")))
         self.group_tools.setVisible(config["tools_visible"])
-        self.btn_show_3d_view.setVisible(self.app_state == AppState.DONE)
+        self.btn_show_3d_view.setEnabled(self.app_state == AppState.DONE and is_interactive)
+        self.btn_replay_animation.setEnabled(self.app_state == AppState.DONE and is_interactive)
         self.frame_slider.setEnabled(config["slider_enabled"])
         self.btn_select_folder.setEnabled(config["select_folder_enabled"] and is_interactive)
         self.btn_reset.setEnabled(is_interactive)
@@ -373,6 +414,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.zoom_in_action.setEnabled(bool(self.images))
         self.zoom_out_action.setEnabled(bool(self.images))
         self.reset_zoom_action.setEnabled(bool(self.images))
+        self.btn_pan_mode.setEnabled(bool(self.images) and is_interactive)
+        self.btn_reset_view.setEnabled(bool(self.images) and is_interactive)
         if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
             self.info_label.setText(self.tr("info_drawing_noise"))
 
@@ -504,10 +547,16 @@ class YC_VesselTracerApp(QMainWindow):
         if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
             self.noise_rois.append(roi)
             self.info_label.setText(f"Defined {len(self.noise_rois)} noise area(s).")
-            self.drawing_mode = None
-            self.vessel_masks = None
-            self.update_range_view()
+            self.drawing_mode = DrawingMode.MARKING
             self.update_ui_for_state()
+
+    def toggle_pan_mode(self, checked: bool):
+        if checked:
+            self.drawing_mode = DrawingMode.PAN
+            self.image_label.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.drawing_mode = DrawingMode.MARKING
+            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
 
     def show_segmented_path_preview(self):
         if self.app_state != AppState.RANGE_CONFIRMED: return
@@ -638,26 +687,61 @@ class YC_VesselTracerApp(QMainWindow):
         dialog = YC_StepViewerDialog(steps, self)
         dialog.exec()
 
-        self.image_label.setPixmap(convert_np_to_pixmap(self.final_path_image))
         self.app_state = AppState.DONE
+        self.setup_path_visibility_controls()
+        self.update_path_display()
         self.update_ui_for_state()
 
     def generate_final_path_image(self, base_original_pip):
-        final_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
+        # This function now just prepares the base image. Drawing is handled by update_path_display.
+        self.final_path_base_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
         if not self.final_paths:
-            self.final_path_image = final_image
+            self.final_path_image = self.final_path_base_image
+            return
+        # The actual drawing is deferred to update_path_display
+        self.update_path_display()
+
+    def setup_path_visibility_controls(self):
+        # Clear previous checkboxes
+        while self.path_selection_layout.count():
+            child = self.path_selection_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        all_paths = (self.final_paths or []) + (self.alternative_paths or [])
+        self.visible_paths = [True] * len(all_paths)
+
+        for i, path in enumerate(all_paths):
+            path_name = f"Main Path" if i == 0 else f"Alternative {i}"
+            checkbox = QCheckBox(path_name)
+            checkbox.setChecked(True)
+            checkbox.stateChanged.connect(lambda state, index=i: self.toggle_path_visibility(index, state))
+            self.path_selection_layout.addWidget(checkbox)
+
+    def toggle_path_visibility(self, index, state):
+        self.visible_paths[index] = (state == Qt.CheckState.Checked.value)
+        self.update_path_display()
+
+    def update_path_display(self):
+        if not hasattr(self, 'final_path_base_image') or self.final_path_base_image is None:
             return
 
-        main_path = self.final_paths[0]
-        path_points = np.array(main_path, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.polylines(final_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
+        # Start with a fresh copy of the base image
+        display_image = self.final_path_base_image.copy()
 
-        for alt_path in self.alternative_paths:
-            alt_path_points = np.array(alt_path, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(final_image, [alt_path_points[:,:,::-1]], isClosed=False, color=(255, 255, 0), thickness=2, lineType=cv2.LINE_AA)
+        all_paths = (self.final_paths or []) + (self.alternative_paths or [])
+        path_colors = [(50, 255, 50), (255, 255, 0), (0, 100, 255)] # Green, Yellow, Blue
 
-        self.final_path_image = final_image
+        for i, path in enumerate(all_paths):
+            if i < len(self.visible_paths) and self.visible_paths[i]:
+                path_points = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
+                color = path_colors[i % len(path_colors)]
+                thickness = 3 if i == 0 else 2
+                cv2.polylines(display_image, [path_points[:,:,::-1]], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+        self.final_path_image = display_image
         self.overlay_points_on_image(self.final_path_image)
+        self.image_label.setPixmap(convert_np_to_pixmap(self.final_path_image))
 
     def overlay_points_on_image(self, image):
         for i, p_info in enumerate(self.path_points_info):
