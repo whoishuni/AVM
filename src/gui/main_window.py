@@ -75,6 +75,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.app_state: AppState = AppState.IDLE
         self.smoothing_level: int = 4
         self.visible_paths: List[bool] = []
+        self.animation_data: Optional[Dict[str, Any]] = None
 
         self.init_ui()
         self.create_actions()
@@ -680,8 +681,8 @@ class YC_VesselTracerApp(QMainWindow):
             path_points = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(path_base_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
 
-        anim_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
-        steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", anim_data))
+        self.animation_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
+        steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", self.animation_data))
 
         self.generate_final_path_image(base_original_pip)
         steps.append((convert_np_to_pixmap(self.final_path_image), "Final Result"))
@@ -819,6 +820,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.path_points_info = []
         self.smoothing_level = 4
         self.visible_paths = []
+        self.animation_data = None
         self.params = self.DEFAULT_PARAMS.copy()
 
         # Clear path selection checkboxes
@@ -877,19 +879,25 @@ class YC_VesselTracerApp(QMainWindow):
         dialog.exec()
         self.statusBar().showMessage("Ready")
 
-    def replay_path_animation(self, anim_data):
+    def replay_path_animation(self, anim_data=None):
+        if not hasattr(self, 'animation_data') or not self.animation_data:
+            QMessageBox.warning(self, "Animation Data Not Found",
+                                "Please run a full analysis first to generate the animation data.")
+            return
+
         self.statusBar().showMessage("Replaying pathfinding animation...")
-        cost_map = anim_data["costmap"]
-        pixels = anim_data["pixels"]
-        base_image = anim_data["baseimage"]
-        identity_map = anim_data["identity_map"]
-        width_map = anim_data["width_map"]
-        main_vessel_width = anim_data["main_vessel_width"]
+        # Use the stored animation data
+        cost_map = self.animation_data["costmap"]
+        pixels = self.animation_data["pixels"]
+        base_image = self.animation_data["baseimage"]
+        identity_map = self.animation_data["identity_map"]
+        width_map = self.animation_data["width_map"]
+        main_vessel_width = self.animation_data["main_vessel_width"]
 
         def update_viz(visited):
             temp_img = base_image.copy()
             for node in visited:
-                temp_img[node[0], node[1]] = (100, 0, 0)
+                temp_img[node[0], node[1]] = (100, 0, 0) # Dark red for visited nodes
             self.image_label.setPixmap(convert_np_to_pixmap(temp_img))
             QApplication.processEvents()
 
@@ -900,8 +908,9 @@ class YC_VesselTracerApp(QMainWindow):
                 full_path.extend(segment if i == 0 else segment[1:])
 
         path_points = np.array(full_path, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.polylines(base_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
-        self.image_label.setPixmap(convert_np_to_pixmap(base_image))
+        final_image_with_path = base_image.copy()
+        cv2.polylines(final_image_with_path, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
+        self.image_label.setPixmap(convert_np_to_pixmap(final_image_with_path))
         self.statusBar().showMessage("Animation replay finished.", 3000)
 
     def closeEvent(self, event):
