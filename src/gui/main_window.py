@@ -23,7 +23,7 @@ from gui.parameter_dialog import YC_ParameterDialog
 from gui.markdown_dialog import YC_MarkdownDialog
 from core.image_processing import (
     create_enhanced_vessel_masks, create_maximum_intensity_projection,
-    create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
+    create_temporal_maps, build_vessel_identity_map, create_vessel_layers,
     create_combined_identity_map, generate_mask_steps
 )
 from core.pathfinding import find_path_astar
@@ -47,7 +47,8 @@ class YC_VesselTracerApp(QMainWindow):
         "PATHFINDING_OBSTACLE_COST": 1e9, "TURN_PENALTY_WEIGHT": 50.0,
         "DYNAMIC_COST_WEIGHT": 5.0, "STRAIGHT_PATH_THRESHOLD": 0.9,
         "CROSS_VESSEL_PENALTY": 1e6, "MAIN_VESSEL_WIDTH_TOLERANCE": 0.30,
-        "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0
+        "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0,
+        "TEMPORAL_GAP_PENALTY_WEIGHT": 20.0
     }
 
     def __init__(self, language="en"):
@@ -78,7 +79,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.final_path_image: Optional[np.ndarray] = None
         self.final_path_base_image: Optional[np.ndarray] = None
         self.base_mask_projection: Optional[np.ndarray] = None
-        self.temporal_cost_map: Optional[np.ndarray] = None
+        self.start_frame_map: Optional[np.ndarray] = None
+        self.end_frame_map: Optional[np.ndarray] = None
         self.current_frame_index: int = 0
         self.path_points_info: List[Dict[str, Any]] = []
         self.app_state: AppState = AppState.IDLE
@@ -632,7 +634,13 @@ class YC_VesselTracerApp(QMainWindow):
         if masks and updater.is_running:
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
-            self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.params["PATHFINDING_OBSTACLE_COST"])
+
+            temporal_maps = create_temporal_maps(self.vessel_masks, self.params["PATHFINDING_OBSTACLE_COST"])
+            if temporal_maps:
+                self.start_frame_map, self.end_frame_map = temporal_maps
+            else:
+                self.start_frame_map, self.end_frame_map = None, None
+
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks)
             return True
         else:
@@ -694,13 +702,29 @@ class YC_VesselTracerApp(QMainWindow):
         self.statusBar().showMessage(self.tr("info_processing"))
         QApplication.processEvents()
 
-        cumulative_cost_map = self.temporal_cost_map.copy()
         all_found_paths = []
-        for _ in range(3):
+
+        # Create a dynamic cost map that will be updated after finding each path
+        dynamic_cost_map = np.zeros_like(self.start_frame_map, dtype=np.float32)
+
+        for _ in range(3): # Try to find up to 3 paths
             full_path = []
             is_path_complete = True
+
+            # Add the dynamic cost to the base start_frame_map for this iteration
+            current_start_map = self.start_frame_map + dynamic_cost_map
+
             for i in range(len(mask_pixels) - 1):
-                segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params)
+                segment = find_path_astar(
+                    current_start_map,
+                    self.end_frame_map,
+                    mask_pixels[i],
+                    mask_pixels[i+1],
+                    combined_identity_map,
+                    width_map,
+                    main_vessel_width,
+                    self.params
+                )
                 if segment:
                     full_path.extend(segment if i == 0 else segment[1:])
                 else:
@@ -708,8 +732,9 @@ class YC_VesselTracerApp(QMainWindow):
                     break
             if is_path_complete and full_path:
                 all_found_paths.append(full_path)
+                # Update the dynamic cost map to penalize this path in the next search
                 for y, x in full_path:
-                    cumulative_cost_map[y, x] += 1e7
+                    dynamic_cost_map[y, x] += 1e7
             else:
                 break
 
@@ -727,7 +752,7 @@ class YC_VesselTracerApp(QMainWindow):
             path_points = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(path_base_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
 
-        self.animation_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
+        self.animation_data = {"type": "animation", "costmap": self.start_frame_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
         steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", self.animation_data))
 
         self.generate_final_path_image(base_original_pip)
@@ -878,7 +903,7 @@ class YC_VesselTracerApp(QMainWindow):
             for y, x in path:
                 path_x.append(x)
                 path_y.append(y)
-                path_z.append(self.temporal_cost_map[y, x])
+                path_z.append(self.start_frame_map[y, x])
             path_name = f"Path {i+1}" if i > 0 else "Main Path"
             path_trace = go.Scatter3d(x=path_x, y=path_y, z=path_z, mode='lines', line=dict(color=path_colors[i % len(path_colors)], width=8), name=path_name)
             traces.append(path_trace)
@@ -897,7 +922,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.final_path_image = None
         self.final_path_base_image = None
         self.base_mask_projection = None
-        self.temporal_cost_map = None
+        self.start_frame_map = None
+        self.end_frame_map = None
         self.path_points_info = []
         self.smoothing_level = 4
         self.visible_paths = []

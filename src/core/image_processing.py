@@ -136,17 +136,50 @@ def create_maximum_intensity_projection(images: List[np.ndarray]) -> Optional[np
     return np.max(np.stack(images, axis=0), axis=0)
 
 
-def create_temporal_cost_map(masks: List[np.ndarray], obstacle_cost: float) -> Optional[np.ndarray]:
-    """Creates a cost map where the cost is related to the frame number (time)."""
-    if not masks: return None
+def create_temporal_maps(masks: List[np.ndarray], obstacle_cost: float) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Creates maps detailing the start and end frames for each vessel pixel.
+
+    Args:
+        masks: A list of binary masks, one for each frame.
+        obstacle_cost: The cost value to assign to non-vessel pixels.
+
+    Returns:
+        A tuple containing two numpy arrays:
+        - start_frame_map: Each pixel's value is the first frame it appears in.
+        - end_frame_map: Each pixel's value is the last frame it appears in.
+        Returns None if the mask list is empty.
+    """
+    if not masks:
+        return None
+
     h, w = masks[0].shape
-    cost_map = np.full((h, w), obstacle_cost, dtype=np.float32)
+    # Initialize start map with a high value (obstacle_cost) and end map with a low value (-1)
+    start_frame_map = np.full((h, w), obstacle_cost, dtype=np.float32)
+    end_frame_map = np.full((h, w), -1, dtype=np.float32)
 
     for frame_idx, mask in enumerate(masks):
         vessel_pixels = mask > 0
-        cost_map[vessel_pixels] = np.minimum(cost_map[vessel_pixels], frame_idx)
 
-    return cost_map
+        # Update start frame: only update if the new frame_idx is smaller
+        start_frame_map[vessel_pixels] = np.minimum(start_frame_map[vessel_pixels], frame_idx)
+
+        # Update end frame: always update with the current frame_idx for pixels present in the mask
+        end_frame_map[vessel_pixels] = frame_idx
+
+    # Set non-vessel pixels in the end_frame_map to an invalid value (-1 or similar)
+    # This is already handled by the initialization, so we just ensure consistency
+    end_frame_map[start_frame_map == obstacle_cost] = -1
+
+    return start_frame_map, end_frame_map
+
+def create_temporal_cost_map(masks: List[np.ndarray], obstacle_cost: float) -> Optional[np.ndarray]:
+    """
+    Creates a cost map where the cost is related to the first frame a vessel pixel appears.
+    This is now a wrapper around `create_temporal_maps` for backward compatibility.
+    """
+    maps = create_temporal_maps(masks, obstacle_cost)
+    return maps[0] if maps else None
 
 
 def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional[np.ndarray]:
