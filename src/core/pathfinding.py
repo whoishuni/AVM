@@ -184,14 +184,17 @@ def find_path_astar_3d(
         _, current = heapq.heappop(open_set)
         current_y, current_x, current_t = current
 
-        # If we reach the target frame and are close to the end point
-        if current[0] == end_node_2d[0] and current[1] == end_node_2d[1] and current[2] >= end_info["frame"]:
-            path = []
-            while current in came_from:
-                path.append((current[0], current[1])) # Project to 2D
-                current = came_from[current]
-            path.append((start_node[0], start_node[1]))
-            return path[::-1]
+        # Goal check: If we are at or past the target frame, we can consider this a potential end point
+        if current_t >= end_info["frame"]:
+            # Check if this point is the closest we've found so far in the target frame
+            dist_to_end = np.linalg.norm(np.array(current[:2]) - np.array(end_node_2d))
+
+            # A simple greedy approach: if we hit the exact target, we are done
+            if dist_to_end == 0:
+                break
+            # Otherwise, we continue searching for a potentially better path that ends closer
+            # A more complex implementation could store the best path found so far and prune searches
+            # that are already more expensive.
 
         # --- Process Neighbors ---
         # Neighbors are in the current frame and the next frame
@@ -239,5 +242,26 @@ def find_path_astar_3d(
                         f_cost = new_g_cost + heuristic(neighbor)
                         heapq.heappush(open_set, (f_cost, neighbor))
                         came_from[neighbor] = current
+
+    # After the search, reconstruct the path that ends closest to the target
+    best_end_node = None
+    min_dist = float('inf')
+
+    # Find the node in the closed set that is in the target frame and closest to the end point
+    for node in g_costs:
+        if node[2] >= end_info["frame"]:
+            dist = np.linalg.norm(np.array(node[:2]) - np.array(end_node_2d))
+            if dist < min_dist:
+                min_dist = dist
+                best_end_node = node
+
+    if best_end_node:
+        path = []
+        current = best_end_node
+        while current in came_from:
+            path.append((current[0], current[1])) # Project to 2D
+            current = came_from[current]
+        path.append((start_node[0], start_node[1]))
+        return path[::-1]
 
     return None # No path found

@@ -706,13 +706,14 @@ class YC_VesselTracerApp(QMainWindow):
             # --- 3D A* Temporal Search ---
             if self.vessel_masks:
                  # In 3D search, we do one holistic search from the first point to the last
-                start_p_info = self.path_points_info[0]
-                end_p_info = self.path_points_info[-1]
-
-                # Adjust start/end info with the pixel locations on the mask
-                start_p_info['point'] = (mask_pixels[0][0], mask_pixels[0][1])
-                end_p_info['point'] = (mask_pixels[-1][0], mask_pixels[-1][1])
-
+                start_p_info = {
+                    "point": (mask_pixels[0][0], mask_pixels[0][1]),
+                    "frame": self.path_points_info[0]["frame"]
+                }
+                end_p_info = {
+                    "point": (mask_pixels[-1][0], mask_pixels[-1][1]),
+                    "frame": self.path_points_info[-1]["frame"]
+                }
                 full_path = find_path_astar_3d(self.vessel_masks, start_p_info, end_p_info, self.params)
                 if full_path:
                     all_found_paths.append(full_path)
