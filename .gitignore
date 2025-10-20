@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
+.pyc
 # PyInstaller
 #  Usually these files are created by the PyInstaller spec file
 build/
