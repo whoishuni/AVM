@@ -26,7 +26,7 @@ from core.image_processing import (
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
     create_combined_identity_map, generate_mask_steps
 )
-from core.pathfinding import find_path_astar
+from core.pathfinding import find_path_astar, find_path_astar_3d
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
     convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
@@ -134,12 +134,14 @@ class YC_VesselTracerApp(QMainWindow):
                 "param_straight_path_threshold_desc": "Cosine similarity threshold to consider a path segment 'straight'. Used for penalizing turns.",
                 "param_cross_vessel_penalty_desc": "A large penalty applied when a path crosses into a different vessel, based on the identity map.",
                 "param_main_vessel_width_tolerance_desc": "Tolerance (as a percentage) for how much a side branch's width can deviate from the main vessel's width.",
-                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch."
+                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch.",
+                "temporal_search_checkbox": "Enable Temporal Search (3D A*)"
             },
             "zh": {
                 "app_title": "YC_血管尋路", "select_folder": "選擇圖片資料夾",
                 "start_marking": "開始標記路徑", "confirm_points": "確認標記點",
                 "run_analysis": "執行完整分析", "analysis_complete": "分析完成",
+                "temporal_search_checkbox": "啟用時序搜尋 (3D A*)",
                 "processing": "處理中...", "reset_all": "全部重置",
                 "draw_noise": "繪製雜訊區域", "adjust_smoothing": "調整平滑度",
                 "preview_mask": "預覽遮罩", "show_3d_view": "顯示3D視圖",
@@ -198,6 +200,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_replay_animation.setText(self.tr("replay_animation"))
         self.btn_reset.setText(self.tr("reset_all"))
         self.btn_pan_mode.setText(self.tr("pan_mode"))
+        self.checkbox_temporal_search.setText(self.tr("temporal_search_checkbox"))
         self.btn_reset_view.setText(self.tr("reset_view"))
         self.open_action.setText(self.tr("open_folder_action"))
         self.reset_action.setText(self.tr("reset_action"))
@@ -319,6 +322,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.group_execute = QGroupBox()
         group3_layout = QVBoxLayout(self.group_execute)
         self.btn_main_action = QPushButton()
+        self.checkbox_temporal_search = QCheckBox("Enable Temporal Search (3D A*)")
+        self.checkbox_temporal_search.setChecked(True) # Default to new method
+        group3_layout.addWidget(self.checkbox_temporal_search)
         group3_layout.addWidget(self.btn_main_action)
         right_controls_layout.addWidget(self.group_execute)
 
@@ -693,25 +699,44 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.statusBar().showMessage(self.tr("info_processing"))
         QApplication.processEvents()
-
-        cumulative_cost_map = self.temporal_cost_map.copy()
         all_found_paths = []
-        for _ in range(3):
-            full_path = []
-            is_path_complete = True
-            for i in range(len(mask_pixels) - 1):
-                segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params)
-                if segment:
-                    full_path.extend(segment if i == 0 else segment[1:])
+        use_temporal_search = self.checkbox_temporal_search.isChecked()
+
+        if use_temporal_search:
+            # --- 3D A* Temporal Search ---
+            if self.vessel_masks:
+                 # In 3D search, we do one holistic search from the first point to the last
+                start_p_info = self.path_points_info[0]
+                end_p_info = self.path_points_info[-1]
+
+                # Adjust start/end info with the pixel locations on the mask
+                start_p_info['point'] = (mask_pixels[0][0], mask_pixels[0][1])
+                end_p_info['point'] = (mask_pixels[-1][0], mask_pixels[-1][1])
+
+                full_path = find_path_astar_3d(self.vessel_masks, start_p_info, end_p_info, self.params)
+                if full_path:
+                    all_found_paths.append(full_path)
                 else:
-                    is_path_complete = False
+                     QMessageBox.warning(self, "Pathfinding Failed", "Temporal (3D) A* search could not find a path.")
+        else:
+            # --- Original 2D A* Search ---
+            cumulative_cost_map = self.temporal_cost_map.copy()
+            for _ in range(3): # Find up to 3 paths
+                full_path = []
+                is_path_complete = True
+                for i in range(len(mask_pixels) - 1):
+                    segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i + 1], combined_identity_map, width_map, main_vessel_width, self.params)
+                    if segment:
+                        full_path.extend(segment if i == 0 else segment[1:])
+                    else:
+                        is_path_complete = False
+                        break
+                if is_path_complete and full_path:
+                    all_found_paths.append(full_path)
+                    for y, x in full_path:
+                        cumulative_cost_map[y, x] += 1e7
+                else:
                     break
-            if is_path_complete and full_path:
-                all_found_paths.append(full_path)
-                for y, x in full_path:
-                    cumulative_cost_map[y, x] += 1e7
-            else:
-                break
 
         if all_found_paths:
             self.final_paths = [all_found_paths[0]]

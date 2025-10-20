@@ -129,3 +129,115 @@ def find_path_astar(
                     came_from[neighbor] = current
 
     return None  # No path found
+
+
+def find_path_astar_3d(
+    vessel_masks: List[np.ndarray],
+    start_info: dict,
+    end_info: dict,
+    params: dict
+) -> Optional[List[Tuple[int, int]]]:
+    """
+    Finds a path using a 3D A* algorithm, where the dimensions are (y, x, time).
+
+    This algorithm searches through the sequence of vessel masks, ensuring that
+    the resulting path is temporally contiguous.
+
+    Args:
+        vessel_masks: A list of binary numpy arrays, where each array is a frame.
+        start_info: A dictionary with "point" (y, x) and "frame" index for the start.
+        end_info: A dictionary with "point" (y, x) and "frame" index for the end.
+        params: A dictionary of tuning parameters.
+
+    Returns:
+        A list of (y, x) tuples for the path projection on the 2D plane, or None.
+    """
+    start_node = (start_info["point"][0], start_info["point"][1], start_info["frame"])
+    end_node_2d = (end_info["point"][0], end_info["point"][1])
+    num_frames = len(vessel_masks)
+
+    obstacle_cost = params.get("PATHFINDING_OBSTACLE_COST", 1e9)
+    time_cost_weight = params.get("TIME_COST_WEIGHT", 1.0)
+    turn_penalty_weight = params.get("TURN_PENALTY_WEIGHT", 50.0)
+
+    # Check if start or end points are valid
+    if not (0 <= start_node[2] < num_frames and vessel_masks[start_node[2]][start_node[0], start_node[1]] > 0):
+        return None
+    if not (0 <= end_info["frame"] < num_frames and vessel_masks[end_info["frame"]][end_info["point"][0], end_info["point"][1]] > 0):
+         # Even if the exact end point is not on a vessel (due to clicking error),
+         # the search should still proceed and find the nearest valid vessel point.
+         pass
+
+
+    open_set = [(0, start_node)]  # (f_cost, node)
+    came_from = {}
+    g_costs = {start_node: 0}
+
+    def heuristic(node):
+        # 3D Euclidean distance
+        dist_y = abs(node[0] - end_node_2d[0])
+        dist_x = abs(node[1] - end_node_2d[1])
+        dist_t = abs(node[2] - end_info["frame"])
+        return np.sqrt(dist_y**2 + dist_x**2 + (dist_t * time_cost_weight)**2)
+
+    while open_set:
+        _, current = heapq.heappop(open_set)
+        current_y, current_x, current_t = current
+
+        # If we reach the target frame and are close to the end point
+        if current[0] == end_node_2d[0] and current[1] == end_node_2d[1] and current[2] >= end_info["frame"]:
+            path = []
+            while current in came_from:
+                path.append((current[0], current[1])) # Project to 2D
+                current = came_from[current]
+            path.append((start_node[0], start_node[1]))
+            return path[::-1]
+
+        # --- Process Neighbors ---
+        # Neighbors are in the current frame and the next frame
+        for dt in [0, 1]:
+            next_t = current_t + dt
+            if not (0 <= next_t < num_frames):
+                continue
+
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0 and dt == 0:
+                        continue
+
+                    neighbor_y, neighbor_x = current_y + dy, current_x + dx
+                    neighbor = (neighbor_y, neighbor_x, next_t)
+
+                    # Boundary and obstacle check
+                    if not (0 <= neighbor_y < vessel_masks[0].shape[0] and 0 <= neighbor_x < vessel_masks[0].shape[1]) \
+                       or vessel_masks[next_t][neighbor_y, neighbor_x] == 0:
+                        continue
+
+                    # --- Cost Calculation ---
+                    move_cost = np.sqrt(dy**2 + dx**2 + (dt * time_cost_weight)**2)
+
+                    # Turn penalty
+                    turn_penalty = 0
+                    if current in came_from:
+                        parent = came_from[current]
+                        v1 = (current_y - parent[0], current_x - parent[1], (current_t - parent[2]))
+                        v2 = (neighbor_y - current_y, neighbor_x - current_x, (next_t - current_t))
+
+                        dot_product = v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]
+                        mag1 = np.sqrt(v1[0]**2 + v1[1]**2 + v1[2]**2)
+                        mag2 = np.sqrt(v2[0]**2 + v2[1]**2 + v2[2]**2)
+
+                        if mag1 > 0 and mag2 > 0:
+                            cosine_similarity = dot_product / (mag1 * mag2)
+                            turn_penalty = turn_penalty_weight * (1.0 - cosine_similarity)
+
+
+                    new_g_cost = g_costs.get(current, float('inf')) + move_cost + turn_penalty
+
+                    if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
+                        g_costs[neighbor] = new_g_cost
+                        f_cost = new_g_cost + heuristic(neighbor)
+                        heapq.heappush(open_set, (f_cost, neighbor))
+                        came_from[neighbor] = current
+
+    return None # No path found
