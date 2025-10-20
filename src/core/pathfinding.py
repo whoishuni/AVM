@@ -4,7 +4,8 @@ import math
 from typing import Optional, List, Tuple, Callable
 
 def find_path_astar(
-    cost_map: np.ndarray,
+    start_frame_map: np.ndarray,
+    end_frame_map: np.ndarray,
     start: Tuple[int, int],
     end: Tuple[int, int],
     identity_map: Optional[np.ndarray],
@@ -16,13 +17,14 @@ def find_path_astar(
     """
     Finds the optimal path between two points using a modified A* algorithm.
 
-    This implementation includes costs for distance, time (from cost_map),
+    This implementation includes costs for distance, time, temporal coherence,
     and dynamic penalties for path curvature and crossing vessel boundaries.
     The penalties are adjusted based on whether the path is on a 'main' or
     'side' vessel, determined by vessel width.
 
     Args:
-        cost_map: The base cost map (incorporating temporal cost).
+        start_frame_map: Map where each pixel's value is its first appearance frame.
+        end_frame_map: Map where each pixel's value is its last appearance frame.
         start: The starting (y, x) coordinate tuple.
         end: The ending (y, x) coordinate tuple.
         identity_map: Map assigning a unique ID to each vessel segment.
@@ -35,12 +37,11 @@ def find_path_astar(
         A list of (y, x) tuples representing the path, or None if no path is found.
     """
     obstacle_cost = params["PATHFINDING_OBSTACLE_COST"]
-    if cost_map[start] >= obstacle_cost or cost_map[end] >= obstacle_cost:
+    if start_frame_map[start] >= obstacle_cost or start_frame_map[end] >= obstacle_cost:
         return None
 
     # The open set is a priority queue storing (f_cost, g_cost, position).
-    # f_cost is the estimated total cost (g_cost + heuristic), but here we use g_cost
-    # as the priority, making it closer to Dijkstra's algorithm.
+    # We use g_cost as the priority, making it closer to Dijkstra's algorithm.
     open_set = [(0, 0, start)]
     came_from = {}
     g_costs = {start: 0}
@@ -79,11 +80,21 @@ def find_path_astar(
                 neighbor = (current[0] + dr, current[1] + dc)
 
                 # --- Boundary and Obstacle Checks ---
-                if not (0 <= neighbor[0] < cost_map.shape[0] and 0 <= neighbor[1] < cost_map.shape[1]) \
-                   or cost_map[neighbor] >= obstacle_cost or neighbor in closed_set:
+                if not (0 <= neighbor[0] < start_frame_map.shape[0] and 0 <= neighbor[1] < start_frame_map.shape[1]) \
+                   or start_frame_map[neighbor] >= obstacle_cost or neighbor in closed_set:
                     continue
 
                 # --- Calculate Penalties and Costs ---
+
+                # 1. Temporal Gap Penalty
+                temporal_gap_penalty = 0
+                current_end_frame = end_frame_map[current]
+                neighbor_start_frame = start_frame_map[neighbor]
+                if current_end_frame != -1 and neighbor_start_frame < obstacle_cost:
+                    gap = neighbor_start_frame - current_end_frame
+                    if gap > 1: # A gap of 1 is normal (frame N to N+1)
+                        temporal_gap_penalty = params["TEMPORAL_GAP_PENALTY_WEIGHT"] * (gap ** 2)
+
                 cosine_similarity = 1.0
                 if parent:
                     v1 = (current[0] - parent[0], current[1] - parent[1])
@@ -113,14 +124,14 @@ def find_path_astar(
                 if not is_on_main_vessel:
                     turn_penalty *= params["SIDE_BRANCH_TURN_PENALTY_MULTIPLIER"]
 
-                # 3. Movement and Time Costs
+                # 4. Movement and Time Costs
                 # Penalize non-straight moves more heavily
                 dynamic_cost_multiplier = 1.0 + params["DYNAMIC_COST_WEIGHT"] * (1.0 - cosine_similarity)
                 move_cost = (np.sqrt(dr**2 + dc**2)) * dynamic_cost_multiplier
-                time_cost = (params["TIME_COST_WEIGHT"] * cost_map[neighbor]) * dynamic_cost_multiplier
+                time_cost = (params["TIME_COST_WEIGHT"] * start_frame_map[neighbor]) * dynamic_cost_multiplier
 
                 # --- Total Cost Calculation ---
-                new_g_cost = g_costs.get(current, float('inf')) + move_cost + time_cost + turn_penalty + cross_vessel_penalty
+                new_g_cost = g_costs.get(current, float('inf')) + move_cost + time_cost + turn_penalty + cross_vessel_penalty + temporal_gap_penalty
 
                 if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
                     g_costs[neighbor] = new_g_cost

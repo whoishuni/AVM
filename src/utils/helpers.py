@@ -120,14 +120,14 @@ def convert_np_to_pixmap(image_data: np.ndarray) -> QPixmap:
 
 # --- Pathfinding and Geometry ---
 
-def find_closest_pixel_on_mask(point: QPoint, mask_img: np.ndarray, max_radius: int) -> Optional[Tuple[int, int]]:
+def find_closest_pixel_on_mask(point: any, mask_img: np.ndarray, max_radius: int) -> Optional[Tuple[int, int]]:
     """
     Finds the closest white pixel on a binary mask to a given point.
 
     The search is limited to a maximum radius to prevent incorrect matches.
 
     Args:
-        point: The QPoint (in image coordinates) to search from.
+        point: The point to search from. Can be a QPoint-like object with .x() and .y() methods, or a tuple (y, x).
         mask_img: The binary mask to search within.
         max_radius: The maximum pixel distance to search.
 
@@ -143,8 +143,12 @@ def find_closest_pixel_on_mask(point: QPoint, mask_img: np.ndarray, max_radius: 
     if valid_points.size == 0:
         return None
 
-    # Calculate the distance from the clicked point to all valid mask points.
-    point_coords = np.array([point.y(), point.x()])
+    # For compatibility, handle both QPoint objects and (y, x) tuples
+    if hasattr(point, 'y') and hasattr(point, 'x'): # QPoint-like object
+        point_coords = np.array([point.y(), point.x()])
+    else: # Tuple or list
+        point_coords = np.array(point)
+
     distances = np.linalg.norm(valid_points - point_coords, axis=1)
     min_dist_idx = np.argmin(distances)
 
