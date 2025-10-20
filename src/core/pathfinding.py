@@ -129,3 +129,89 @@ def find_path_astar(
                     came_from[neighbor] = current
 
     return None  # No path found
+
+
+def find_path_astar_3d(
+    vessel_masks: List[np.ndarray],
+    start_node: Tuple[int, int, int],
+    end_node: Tuple[int, int, int],
+    params: dict,
+) -> Optional[List[Tuple[int, int]]]:
+    """
+    Finds the optimal path in a 3D space (y, x, time) using A*.
+
+    This version searches through a sequence of 2D vessel masks, treating time
+    as the third dimension. It's designed to find paths that are temporally
+    logical, meaning they generally move forward in time.
+
+    Args:
+        vessel_masks: A list of binary masks, where each mask represents a frame in time.
+        start_node: The starting (y, x, t) coordinate tuple.
+        end_node: The ending (y, x, t) coordinate tuple.
+        params: A dictionary of tuning parameters for the algorithm.
+
+    Returns:
+        A list of (y, x) tuples representing the path projected onto 2D,
+        or None if no path is found.
+    """
+    if not vessel_masks:
+        return None
+
+    num_frames, height, width = len(vessel_masks), vessel_masks[0].shape[0], vessel_masks[0].shape[1]
+    time_advancement_cost = params.get("TIME_ADVANCEMENT_COST", 10.0)  # New parameter
+
+    # --- Heuristic Function ---
+    def heuristic(node, goal):
+        return np.linalg.norm(np.array(node) - np.array(goal))
+
+    # --- Node Validation ---
+    def is_valid(node):
+        y, x, t = node
+        if not (0 <= t < num_frames and 0 <= y < height and 0 <= x < width):
+            return False
+        return vessel_masks[t][y, x] > 0
+
+    if not is_valid(start_node) or not is_valid(end_node):
+        return None
+
+    open_set = [(0 + heuristic(start_node, end_node), 0, start_node)]  # (f_cost, g_cost, node)
+    came_from = {}
+    g_costs = {start_node: 0}
+
+    while open_set:
+        _, g_cost, current = heapq.heappop(open_set)
+
+        if (current[0], current[1]) == (end_node[0], end_node[1]) and current[2] >= end_node[2]:
+            path = []
+            while current in came_from:
+                path.append((current[0], current[1])) # Project to 2D
+                current = came_from[current]
+            path.append((start_node[0], start_node[1]))
+            return path[::-1]
+
+        # --- Explore Neighbors in 3D ---
+        y, x, t = current
+        # (dy, dx, dt)
+        for dy, dx, dt in [
+            (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0),  # Cardinal
+            (-1, -1, 0), (-1, 1, 0), (1, -1, 0), (1, 1, 0), # Diagonal
+            (0, 0, 1)  # Time advancement
+        ]:
+            neighbor = (y + dy, x + dx, t + dt)
+
+            # --- Validation and Cost Calculation ---
+            if not is_valid(neighbor):
+                continue
+
+            move_cost = math.sqrt(dy**2 + dx**2)
+            time_cost = dt * time_advancement_cost
+
+            new_g_cost = g_cost + move_cost + time_cost
+
+            if neighbor not in g_costs or new_g_cost < g_costs.get(neighbor, float('inf')):
+                g_costs[neighbor] = new_g_cost
+                f_cost = new_g_cost + heuristic(neighbor, end_node)
+                heapq.heappush(open_set, (f_cost, new_g_cost, neighbor))
+                came_from[neighbor] = current
+
+    return None

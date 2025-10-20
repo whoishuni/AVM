@@ -26,7 +26,7 @@ from core.image_processing import (
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
     create_combined_identity_map, generate_mask_steps
 )
-from core.pathfinding import find_path_astar
+from core.pathfinding import find_path_astar, find_path_astar_3d
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
     convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
@@ -47,7 +47,8 @@ class YC_VesselTracerApp(QMainWindow):
         "PATHFINDING_OBSTACLE_COST": 1e9, "TURN_PENALTY_WEIGHT": 50.0,
         "DYNAMIC_COST_WEIGHT": 5.0, "STRAIGHT_PATH_THRESHOLD": 0.9,
         "CROSS_VESSEL_PENALTY": 1e6, "MAIN_VESSEL_WIDTH_TOLERANCE": 0.30,
-        "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0
+        "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0,
+        "TIME_ADVANCEMENT_COST": 10.0
     }
 
     def __init__(self, language="en"):
@@ -134,7 +135,9 @@ class YC_VesselTracerApp(QMainWindow):
                 "param_straight_path_threshold_desc": "Cosine similarity threshold to consider a path segment 'straight'. Used for penalizing turns.",
                 "param_cross_vessel_penalty_desc": "A large penalty applied when a path crosses into a different vessel, based on the identity map.",
                 "param_main_vessel_width_tolerance_desc": "Tolerance (as a percentage) for how much a side branch's width can deviate from the main vessel's width.",
-                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch."
+                "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch.",
+                "pathfinding_mode_checkbox": "Enable Temporal 3D A*",
+                "param_time_advancement_cost_desc": "Cost for the 3D A* algorithm to move forward one frame in time."
             },
             "zh": {
                 "app_title": "YC_血管尋路", "select_folder": "選擇圖片資料夾",
@@ -175,7 +178,9 @@ class YC_VesselTracerApp(QMainWindow):
                 "param_straight_path_threshold_desc": "用於判斷一段路徑是否為「直線」的餘弦相似度閾值，主要用於計算轉彎懲罰。",
                 "param_cross_vessel_penalty_desc": "當路徑根據血管身份圖（Identity Map）跨越到不同血管時所施加的高額懲罰。",
                 "param_main_vessel_width_tolerance_desc": "側枝血管寬度與主血管寬度的允許偏差容忍度（百分比）。",
-                "param_side_branch_turn_penalty_multiplier_desc": "當路徑探索潛在的側枝時，對轉彎懲罰應用的特定乘數。"
+                "param_side_branch_turn_penalty_multiplier_desc": "當路徑探索潛在的側枝時，對轉彎懲罰應用的特定乘數。",
+                "pathfinding_mode_checkbox": "啟用 3D A* 時序尋路",
+                "param_time_advancement_cost_desc": "3D A* 演算法在時間上前進一幀的成本。"
             }
         }
         return translations
@@ -199,6 +204,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_reset.setText(self.tr("reset_all"))
         self.btn_pan_mode.setText(self.tr("pan_mode"))
         self.btn_reset_view.setText(self.tr("reset_view"))
+        self.pathfinding_mode_checkbox.setText(self.tr("pathfinding_mode_checkbox"))
         self.open_action.setText(self.tr("open_folder_action"))
         self.reset_action.setText(self.tr("reset_action"))
         self.exit_action.setText(self.tr("exit_action"))
@@ -318,6 +324,9 @@ class YC_VesselTracerApp(QMainWindow):
         # Group 3: Execute
         self.group_execute = QGroupBox()
         group3_layout = QVBoxLayout(self.group_execute)
+        self.pathfinding_mode_checkbox = QCheckBox("Enable Temporal 3D A*")
+        self.pathfinding_mode_checkbox.setChecked(True) # Default to 3D
+        group3_layout.addWidget(self.pathfinding_mode_checkbox)
         self.btn_main_action = QPushButton()
         group3_layout.addWidget(self.btn_main_action)
         right_controls_layout.addWidget(self.group_execute)
@@ -694,24 +703,61 @@ class YC_VesselTracerApp(QMainWindow):
         self.statusBar().showMessage(self.tr("info_processing"))
         QApplication.processEvents()
 
-        cumulative_cost_map = self.temporal_cost_map.copy()
         all_found_paths = []
-        for _ in range(3):
-            full_path = []
-            is_path_complete = True
-            for i in range(len(mask_pixels) - 1):
-                segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params)
+        use_3d_astar = self.pathfinding_mode_checkbox.isChecked()
+
+        if use_3d_astar:
+            # --- 3D A* Logic ---
+            frame_range = self._get_frame_range(for_processing=True)
+            if not frame_range or not self.vessel_masks:
+                # This should not happen if prepare_and_generate_masks was successful
+                QMessageBox.warning(self, "Error", "Cannot perform 3D search: vessel masks not ready.")
+                self.app_state = AppState.RANGE_CONFIRMED
+                self.update_ui_for_state()
+                return
+
+            start_frame_offset = frame_range[0]
+
+            for i in range(len(self.path_points_info) - 1):
+                p_start_info = self.path_points_info[i]
+                p_end_info = self.path_points_info[i+1]
+
+                start_y, start_x = mask_pixels[i]
+                end_y, end_x = mask_pixels[i+1]
+
+                start_t = p_start_info["frame"] - start_frame_offset
+                end_t = p_end_info["frame"] - start_frame_offset
+
+                start_node = (start_y, start_x, start_t)
+                end_node = (end_y, end_x, end_t)
+
+                segment = find_path_astar_3d(self.vessel_masks, start_node, end_node, self.params)
+
                 if segment:
-                    full_path.extend(segment if i == 0 else segment[1:])
+                    # For now, we just find one path in 3D
+                    all_found_paths.append(segment)
                 else:
-                    is_path_complete = False
+                    all_found_paths = [] # Clear if any segment fails
                     break
-            if is_path_complete and full_path:
-                all_found_paths.append(full_path)
-                for y, x in full_path:
-                    cumulative_cost_map[y, x] += 1e7
-            else:
-                break
+        else:
+            # --- Original 2D A* Logic ---
+            cumulative_cost_map = self.temporal_cost_map.copy()
+            for _ in range(3): # Find up to 3 alternative paths
+                full_path = []
+                is_path_complete = True
+                for i in range(len(mask_pixels) - 1):
+                    segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params)
+                    if segment:
+                        full_path.extend(segment if i == 0 else segment[1:])
+                    else:
+                        is_path_complete = False
+                        break
+                if is_path_complete and full_path:
+                    all_found_paths.append(full_path)
+                    for y, x in full_path:
+                        cumulative_cost_map[y, x] += 1e7
+                else:
+                    break
 
         if all_found_paths:
             self.final_paths = [all_found_paths[0]]
@@ -925,6 +971,7 @@ class YC_VesselTracerApp(QMainWindow):
             "MAX_GAP_BRIDGE_DISTANCE": (self.tr("param_max_gap_bridge_distance_desc"), int, 5, 100),
             "FORBIDDEN_ZONE_RADIUS": (self.tr("param_forbidden_zone_radius_desc"), int, 0, 100),
             "TIME_COST_WEIGHT": (self.tr("param_time_cost_weight_desc"), float, 0.0, 10.0),
+            "TIME_ADVANCEMENT_COST": (self.tr("param_time_advancement_cost_desc"), float, 0.0, 100.0),
             "PATHFINDING_OBSTACLE_COST": (self.tr("param_pathfinding_obstacle_cost_desc"), float, 1e6, 1e12),
             "TURN_PENALTY_WEIGHT": (self.tr("param_turn_penalty_weight_desc"), float, 0.0, 500.0),
             "DYNAMIC_COST_WEIGHT": (self.tr("param_dynamic_cost_weight_desc"), float, 0.0, 50.0),
