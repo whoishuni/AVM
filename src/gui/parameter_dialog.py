@@ -35,6 +35,7 @@ class YC_ParameterDialog(QDialog):
             "CROSS_VESSEL_PENALTY": ("High penalty for jumping between different vessels.", float, 1e4, 1e9),
             "MAIN_VESSEL_WIDTH_TOLERANCE": ("Tolerance (%) for a vessel to be considered 'main'.", float, 0.0, 1.0),
             "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": ("Multiplier for turn penalty in side branches.", float, 1.0, 50.0),
+            "DIRECTION_INERTIA_WEIGHT": ("Weight for the direction inertia penalty in graph-based A*.", float, 0.0, 500.0),
         }
 
         for name, value in self.params.items():

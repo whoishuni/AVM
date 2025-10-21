@@ -13,6 +13,7 @@ except ImportError as e:
 
 # --- Local Project Imports ---
 from utils.threading import ProgressUpdater
+from .graph_builder import build_graph_from_skeleton, Graph
 
 # --- Image Enhancement and Segmentation Functions ---
 
@@ -177,39 +178,91 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
     return cleaned_layered_mask
 
 
+def _get_component_orientation(mask: np.ndarray) -> Optional[np.ndarray]:
+    """Calculates the orientation vector of a binary mask component."""
+    coords = np.argwhere(mask)
+    if len(coords) < 5:  # Need minimum points to determine orientation
+        return None
+    coords = coords.astype(np.float32)
+    mean, eigenvectors = cv2.PCACompute(coords, mean=None)
+    return eigenvectors[0]
+
 def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
-    """Builds a map that assigns a unique, persistent ID to each vessel segment across frames."""
+    """
+    Builds a map assigning a unique, persistent ID to each vessel segment,
+    considering overlap, and orientation similarity.
+    """
     if not masks: return None
 
     h, w = masks[0].shape
     identity_map = np.zeros((h, w), dtype=np.int32)
     next_vessel_id = 1
+    vessel_orientations = {}  # Store orientation vector for each vessel ID
 
+    # --- Initialize with the first frame ---
     if np.any(masks[0]):
         num_labels, labels = cv2.connectedComponents(masks[0])
         for label_idx in range(1, num_labels):
-            identity_map[labels == label_idx] = next_vessel_id
+            component_mask = (labels == label_idx)
+            identity_map[component_mask] = next_vessel_id
+            orientation = _get_component_orientation(component_mask)
+            if orientation is not None:
+                vessel_orientations[next_vessel_id] = orientation
             next_vessel_id += 1
 
+    # --- Process subsequent frames ---
     for i in range(1, len(masks)):
-        new_growth_mask = cv2.subtract(masks[i], masks[i-1])
+        # Find new vessel growth
+        new_growth_mask = cv2.subtract(masks[i], masks[i - 1])
         if not np.any(new_growth_mask):
             continue
 
         num_labels, labels = cv2.connectedComponents(new_growth_mask)
         for label_idx in range(1, num_labels):
             component_mask = (labels == label_idx)
-            boundary_mask = component_mask & (masks[i-1] > 0)
+            component_orientation = _get_component_orientation(component_mask)
+
+            # Find overlapping IDs from the previous frame
+            boundary_mask = component_mask & (masks[i - 1] > 0)
             overlap_pixels = identity_map[boundary_mask]
             overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
 
-            if len(overlapping_ids) > 0:
-                unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
-                chosen_id = unique_ids[np.argmax(counts)]
-                identity_map[component_mask] = chosen_id
-            else:
-                identity_map[component_mask] = next_vessel_id
+            if len(overlapping_ids) == 0:
+                # This is a completely new vessel
+                chosen_id = next_vessel_id
                 next_vessel_id += 1
+            else:
+                # Score potential parent IDs based on overlap and orientation
+                best_score = -1
+                chosen_id = -1
+
+                # Get overlap counts for all potential parents
+                unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
+                overlap_scores = {uid: count for uid, count in zip(unique_ids, counts)}
+
+                for uid in unique_ids:
+                    overlap_score = overlap_scores.get(uid, 0)
+
+                    # Calculate orientation similarity
+                    orientation_similarity = 0
+                    if component_orientation is not None and uid in vessel_orientations:
+                        vec1 = component_orientation
+                        vec2 = vessel_orientations[uid]
+                        # Cosine similarity: abs(dot_product) as direction can be flipped
+                        orientation_similarity = abs(np.dot(vec1, vec2))
+
+                    # Combine scores (weights can be tuned)
+                    # We prioritize overlap, but use orientation as a strong tie-breaker
+                    total_score = (overlap_score * 1.0) + (orientation_similarity * 0.5)
+
+                    if total_score > best_score:
+                        best_score = total_score
+                        chosen_id = uid
+
+            # Assign the chosen ID and update orientation map
+            identity_map[component_mask] = chosen_id
+            if component_orientation is not None:
+                 vessel_orientations[chosen_id] = component_orientation
 
     return identity_map
 
@@ -237,6 +290,38 @@ def create_combined_identity_map(
             combined_map[y, x] = unique_pairs[pair]
 
     return combined_map
+
+def process_mip_and_build_graph(mip_image: np.ndarray, params: dict) -> Tuple[Optional[np.ndarray], Optional[Graph]]:
+    """
+    Processes the Maximum Intensity Projection image to create a skeleton and build a graph.
+
+    Args:
+        mip_image: The MIP image.
+        params: A dictionary of tuning parameters.
+
+    Returns:
+        A tuple containing the skeletonized image and the vessel graph.
+    """
+    if mip_image is None:
+        return None, None
+
+    # This is a simplified processing chain for the MIP
+    # It assumes the MIP is already enhanced. In a real scenario,
+    # some of the enhancement steps from create_enhanced_vessel_masks would be applied here.
+
+    _, binary_mask = cv2.threshold(mip_image, 30, 255, cv2.THRESH_BINARY)
+    bridged_mask = bridge_gaps_in_mask(binary_mask, params.get("MAX_GAP_BRIDGE_DISTANCE", 15))
+
+    # Skeletonization
+    skeleton = skeletonize(bridged_mask / 255).astype(np.uint8) * 255
+    if not np.any(skeleton):
+        return skeleton, None
+
+    # Graph building
+    vessel_graph = build_graph_from_skeleton(skeleton)
+
+    return skeleton, vessel_graph
+
 
 def generate_mask_steps(image: np.ndarray, smoothing_level: int, params: dict, bg_color: int) -> List[Tuple[np.ndarray, str]]:
     """Generates a list of (image, description) tuples for visualizing the mask creation process."""
