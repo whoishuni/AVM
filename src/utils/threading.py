@@ -2,54 +2,63 @@ from PyQt6.QtWidgets import QProgressDialog, QApplication
 
 class ProgressUpdater:
     """
-    A helper class to safely update a QProgressDialog from a background thread.
-
-    This class provides a simple and clean interface to update a progress dialog's
-    value and check for user cancellation without passing the dialog object
-    directly into the processing function. This decouples the processing logic
-    from the UI components.
+    A helper class to safely update a QProgressDialog.
+    It can operate directly on the dialog's range or be configured to map
+    a task's progress to a sub-range (e.g., 0-80%) of the dialog's total value.
     """
 
-    def __init__(self, progress_dialog: QProgressDialog):
+    def __init__(self, progress_dialog: QProgressDialog, min_val: int = None, max_val: int = None):
         """
         Initializes the ProgressUpdater.
-
         Args:
             progress_dialog: The QProgressDialog instance to be controlled.
+            min_val: The value on the dialog that corresponds to 0% progress for this task.
+            max_val: The value on the dialog that corresponds to 100% progress for this task.
         """
         self.dialog = progress_dialog
-        # The 'is_running' flag is crucial for signaling cancellation to the background thread.
         self.is_running = True
-        # Set the dialog to be modal, so the user cannot interact with the main window
-        # while the process is running.
         self.dialog.setModal(True)
+
+        # Check if this updater should scale its progress to a sub-range of the dialog
+        self.use_scaling = min_val is not None and max_val is not None
+        if self.use_scaling:
+            self.min_val = min_val
+            self.max_val = max_val
+            self.range = max_val - min_val
+        else:
+            self.min_val, self.max_val, self.range = 0, 0, 0
 
     def update(self, value: int, total: int, message: str = ""):
         """
         Updates the progress dialog and checks for cancellation.
-
-        If the user clicks the "Cancel" button on the dialog, the `is_running`
-        flag is set to False, which the background process should check regularly.
-
-        Args:
-            value: The current progress value.
-            total: The maximum progress value.
-            message: An optional message to display on the progress dialog.
         """
-        # Check if the user has cancelled the operation.
         if self.dialog.wasCanceled():
             self.is_running = False
             return
 
-        # Update the dialog's properties.
-        self.dialog.setMaximum(total)
-        self.dialog.setValue(value)
+        if self.use_scaling:
+            # Scale the task's progress (value/total) to the specified sub-range
+            # of the main dialog (e.g., if range is 0-80, a 50% value becomes 40).
+            scaled_value = self.min_val + int((value / total) * self.range) if total > 0 else self.min_val
+            self.dialog.setValue(scaled_value)
+        else:
+            # Original behavior: direct 1-to-1 update of the dialog's value and max.
+            self.dialog.setMaximum(total)
+            self.dialog.setValue(value)
+
         if message:
             self.dialog.setLabelText(message)
 
-        # Process UI events to ensure the dialog updates immediately and remains responsive.
         QApplication.processEvents()
 
     def finish(self):
-        """Closes the progress dialog."""
-        self.dialog.close()
+        """
+        Finalizes the progress update.
+        If not using scaling, it closes the dialog (original behavior for standalone tasks).
+        If using scaling, it just sets the progress to the max of its range and does NOT close it.
+        """
+        if self.use_scaling:
+            self.dialog.setValue(self.max_val)
+            QApplication.processEvents()
+        else:
+            self.dialog.close()
