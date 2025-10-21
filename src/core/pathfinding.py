@@ -246,9 +246,3 @@ def _find_nearest_node(point: Tuple[int, int], graph: Graph) -> Optional[Node]:
     #     return None
 
     return nodes[nearest_node_idx]
-                # Traversed from node2 to node1 (current_id)
-                path_pixels.extend(edge.pixels)
-
-        current_id = prev_id
-
-    return path_pixels[::-1] # Reverse the final path to be from start to end
