@@ -178,36 +178,64 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
 
 
 def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
-    """Builds a map that assigns a unique, persistent ID to each vessel segment across frames."""
+    """
+    Builds a map that assigns a unique, persistent ID to each vessel segment across frames.
+    This version uses skeletonization to better separate overlapping vessels before assigning IDs.
+    """
     if not masks: return None
 
     h, w = masks[0].shape
     identity_map = np.zeros((h, w), dtype=np.int32)
     next_vessel_id = 1
 
-    if np.any(masks[0]):
-        num_labels, labels = cv2.connectedComponents(masks[0])
+    # --- Process Initial Frame ---
+    # Skeletonize the first mask to get the centerlines, which helps separate components
+    skeleton = skeletonize(masks[0] / 255).astype(np.uint8)
+
+    if np.any(skeleton):
+        num_labels, labels = cv2.connectedComponents(skeleton)
+
         for label_idx in range(1, num_labels):
-            identity_map[labels == label_idx] = next_vessel_id
+            component_skeleton_mask = (labels == label_idx).astype(np.uint8)
+
+            # Find where the skeleton component touches the original mask
+            # This helps to assign the ID to the correct full-width vessel
+            _, intersection_mask = cv2.connectedComponents(masks[0] * component_skeleton_mask)
+
+            # Assign the new ID to the full vessel component
+            identity_map[intersection_mask > 0] = next_vessel_id
             next_vessel_id += 1
 
+    # --- Process Subsequent Frames for Growth ---
     for i in range(1, len(masks)):
+        # Identify new growth in the current frame's mask
         new_growth_mask = cv2.subtract(masks[i], masks[i-1])
         if not np.any(new_growth_mask):
             continue
 
-        num_labels, labels = cv2.connectedComponents(new_growth_mask)
+        # Skeletonize the new growth to separate distinct new branches
+        skeleton_growth = skeletonize(new_growth_mask / 255).astype(np.uint8)
+        num_labels, labels = cv2.connectedComponents(skeleton_growth)
+
         for label_idx in range(1, num_labels):
-            component_mask = (labels == label_idx)
+            component_skeleton_mask = (labels == label_idx).astype(np.uint8)
+
+            # Identify the full-width new growth corresponding to this skeleton component
+            _, full_component_mask = cv2.connectedComponents(new_growth_mask * component_skeleton_mask)
+            component_mask = (full_component_mask > 0)
+
+            # Find where this new component touches the previously identified vessels
             boundary_mask = component_mask & (masks[i-1] > 0)
             overlap_pixels = identity_map[boundary_mask]
             overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
 
             if len(overlapping_ids) > 0:
+                # If it touches an existing vessel, inherit its ID (choosing the one with most overlap)
                 unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
                 chosen_id = unique_ids[np.argmax(counts)]
                 identity_map[component_mask] = chosen_id
             else:
+                # If it's a completely new, unconnected vessel, assign a new ID
                 identity_map[component_mask] = next_vessel_id
                 next_vessel_id += 1
 
