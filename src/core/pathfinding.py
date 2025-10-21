@@ -141,7 +141,6 @@ def find_path_astar(
     width_map: Optional[np.ndarray],
     main_vessel_width: float,
     params: dict,
-    vessel_graph: Optional[Graph] = None,
     viz_callback: Optional[Callable[[List[Tuple[int, int]]], None]] = None
 ) -> Optional[List[Tuple[int, int]]]:
     """
