@@ -1,8 +1,137 @@
 import numpy as np
 import heapq
 import math
-from typing import Optional, List, Tuple, Callable
-from .graph_builder import Graph, Node, Edge
+from typing import Optional, List, Tuple, Callable, Dict
+from collections import deque
+from .flow_analyzer import FlowNode
+
+def find_path_in_flow_graph(
+    flow_graph: Dict[str, FlowNode],
+    start_pixel_qpoint: any, # Actually a QPoint
+    start_frame: int,
+    end_pixel_qpoint: any, # Actually a QPoint
+    end_frame: int,
+    max_search_radius: int
+) -> Optional[List[Tuple[int, int]]]:
+    """
+    Finds a path in the directed flow graph from a start point to an end point.
+    The search is constrained to follow the parent-to-child links.
+    """
+    start_pixel = (start_pixel_qpoint.y(), start_pixel_qpoint.x())
+    end_pixel = (end_pixel_qpoint.y(), end_pixel_qpoint.x())
+
+    start_node = _find_closest_node_to_pixel(flow_graph, start_pixel, start_frame, max_search_radius)
+    end_node = _find_closest_node_to_pixel(flow_graph, end_pixel, end_frame, max_search_radius)
+
+    if not start_node:
+        print(f"Error: Could not map start point {start_pixel} in frame {start_frame} to a flow node.")
+        return None
+    if not end_node:
+        print(f"Error: Could not map end point {end_pixel} in frame {end_frame} to a flow node.")
+        return None
+
+    # Handle case where start and end are the same node
+    if start_node.id == end_node.id:
+        return [tuple(p) for p in start_node.pixels]
+
+    # --- Search forward from start_node's branch to find a path to end_node ---
+    queue = deque([[start_node]])
+    visited = {start_node.id}
+    while queue:
+        path = queue.popleft()
+        current_node = path[-1]
+
+        if current_node.id == end_node.id:
+            # Direct path found
+            return _reconstruct_pixel_path(path)
+
+        for child_node in current_node.children:
+            if child_node.id not in visited:
+                new_path = list(path)
+                new_path.append(child_node)
+                queue.append(new_path)
+                visited.add(child_node.id)
+
+    # --- If no direct forward path, they might be on different branches or end is an ancestor of start ---
+    # To handle this, find the common ancestor.
+    start_ancestors = {n.id: n for n in _get_ancestors(start_node)}
+    end_ancestors = _get_ancestors(end_node)
+
+    common_ancestor_path = None
+    for ancestor in end_ancestors:
+        if ancestor.id in start_ancestors:
+            # Found the youngest common ancestor. Now construct the path:
+            # Path = (start -> ancestor) + (ancestor -> end)
+            path_start_to_ancestor = _trace_path_to_ancestor(start_node, ancestor.id)
+            path_ancestor_to_end = _trace_path_to_ancestor(end_node, ancestor.id)
+
+            if path_start_to_ancestor and path_ancestor_to_end:
+                 # The path from start to ancestor should be reversed
+                common_ancestor_path = list(reversed(path_start_to_ancestor)) + path_ancestor_to_end[1:] # Exclude duplicate ancestor
+                break
+
+    if common_ancestor_path:
+        return _reconstruct_pixel_path(common_ancestor_path)
+
+    print("No path found between the specified points following the flow.")
+    return None
+
+def _reconstruct_pixel_path(node_path: List[FlowNode]) -> List[Tuple[int, int]]:
+    """Converts a path of FlowNodes into a list of pixel coordinates."""
+    pixel_path = []
+    for node in node_path:
+        pixel_path.extend([tuple(p) for p in node.pixels])
+    return pixel_path
+
+def _get_ancestors(node: FlowNode) -> List[FlowNode]:
+    """Traces back from a node to the root, returning the list of ancestors."""
+    path = []
+    curr = node
+    while curr:
+        path.append(curr)
+        curr = curr.parent
+    return path
+
+def _trace_path_to_ancestor(start_node: FlowNode, ancestor_id: str) -> Optional[List[FlowNode]]:
+    """Returns the path from a start_node up to a specific ancestor."""
+    path = []
+    curr = start_node
+    while curr:
+        path.append(curr)
+        if curr.id == ancestor_id:
+            return path
+        curr = curr.parent
+    return None # Ancestor not found
+
+def _find_closest_node_to_pixel(
+    flow_graph: Dict[str, FlowNode],
+    pixel: Tuple[int, int],
+    frame_index: int,
+    max_dist: int
+) -> Optional[FlowNode]:
+    """Finds the closest FlowNode to a pixel within a given frame and search radius."""
+    py, px = pixel
+    closest_node = None
+    min_dist_sq = max_dist ** 2
+
+    for node in flow_graph.values():
+        if node.frame_index != frame_index:
+            continue
+
+        # Check if pixel is within expanded bbox first for efficiency
+        min_r, min_c, max_r, max_c = node.bbox
+        if not (min_r - max_dist <= py < max_r + max_dist and min_c - max_dist <= px < max_c + max_dist):
+            continue
+
+        # Find the squared distance to the closest pixel in the node
+        dist_sq = np.min(np.sum((node.pixels - np.array([py, px]))**2, axis=1))
+
+        if dist_sq < min_dist_sq:
+            min_dist_sq = dist_sq
+            closest_node = node
+
+    return closest_node
+
 
 def find_path_astar(
     cost_map: np.ndarray,
@@ -131,107 +260,3 @@ def find_path_astar(
                     came_from[neighbor] = current
 
     return None  # No path found
-
-
-def find_path_astar_graph(
-    graph: Graph,
-    start_node: Node,
-    end_node: Node,
-    width_map: np.ndarray,
-    identity_map: np.ndarray,
-    params: dict
-) -> Optional[List[Tuple[int, int]]]:
-    """
-    Finds the optimal path between two nodes in a graph using A*.
-    This version incorporates a direction inertia penalty.
-    """
-    # Pre-calculate edge properties if they don't exist
-    if not hasattr(graph, '_edge_properties_calculated'):
-        for edge in graph.edges:
-            pixel_coords = np.array(edge.pixels)
-            y_coords, x_coords = pixel_coords[:, 0], pixel_coords[:, 1]
-
-            edge.avg_width = np.mean(width_map[y_coords, x_coords])
-
-            ids = identity_map[y_coords, x_coords]
-            # Find the most frequent non-zero ID
-            unique_ids, counts = np.unique(ids[ids > 0], return_counts=True)
-            edge.vessel_id = unique_ids[np.argmax(counts)] if len(unique_ids) > 0 else 0
-        graph._edge_properties_calculated = True
-
-
-    open_set = [(0, start_node.id, None)]  # (f_cost, node_id, incoming_edge_id)
-    came_from = {}
-    g_costs = {start_node.id: 0}
-
-    while open_set:
-        _, current_id, incoming_edge_repr = heapq.heappop(open_set)
-
-        if current_id == end_node.id:
-            return _reconstruct_graph_path(graph, came_from, current_id, width_map, identity_map)
-
-        current_node = graph.nodes[current_id]
-        incoming_edge = next((e for e in graph.edges if repr(e) == incoming_edge_repr), None)
-
-        for edge in graph.adjacency[current_id]:
-            neighbor_node = edge.node2 if edge.node1.id == current_id else edge.node1
-
-            # --- Cost Calculation ---
-            move_cost = edge.length
-
-            # --- Penalties ---
-            direction_penalty = 0
-            cross_vessel_penalty = 0
-
-            if incoming_edge:
-                # 1. Direction Inertia Penalty
-                incoming_vector = np.array(incoming_edge.vector) * (-1 if incoming_edge.node2.id != current_id else 1)
-                outgoing_vector = np.array(edge.vector) * (-1 if edge.node1.id != current_id else 1)
-                dot_product = np.dot(incoming_vector, outgoing_vector)
-                cosine_similarity = min(1.0, max(-1.0, dot_product))
-                direction_penalty = params.get("DIRECTION_INERTIA_WEIGHT", 100.0) * (1.0 - cosine_similarity)
-
-                # 2. Cross Vessel Penalty
-                if hasattr(incoming_edge, 'vessel_id') and hasattr(edge, 'vessel_id'):
-                    if incoming_edge.vessel_id != edge.vessel_id:
-                        cross_vessel_penalty = params.get("CROSS_VESSEL_PENALTY", 1e6)
-
-
-            new_g_cost = g_costs.get(current_id, float('inf')) + move_cost + direction_penalty + cross_vessel_penalty
-
-            if neighbor_node.id not in g_costs or new_g_cost < g_costs[neighbor_node.id]:
-                g_costs[neighbor_node.id] = new_g_cost
-                h_cost = np.linalg.norm(np.array((neighbor_node.y, neighbor_node.x)) - np.array((end_node.y, end_node.x)))
-                f_cost = new_g_cost + h_cost
-
-                heapq.heappush(open_set, (f_cost, neighbor_node.id, repr(edge)))
-                came_from[neighbor_node.id] = (current_id, repr(edge))
-
-    return None # No path found
-
-
-def _reconstruct_graph_path(graph: Graph, came_from: dict, current_id: str, width_map: np.ndarray, identity_map: np.ndarray) -> List[Tuple[int, int]]:
-    """Reconstructs the path from the came_from dictionary, returning a list of pixels."""
-    total_path = []
-
-    # Add the pixels of the final node
-    current_node = graph.nodes[current_id]
-    total_path.append((current_node.y, current_node.x))
-
-    while current_id in came_from:
-        prev_id, edge_repr = came_from[current_id]
-
-        edge = next((e for e in graph.edges if repr(e) == edge_repr), None)
-
-        if edge:
-            edge_pixels = list(edge.pixels)
-            # If the path is from node2 to node1, reverse the pixels
-            if edge.node2.id == current_id:
-                edge_pixels.reverse()
-
-            # Prepend the pixels to the total path
-            total_path = edge_pixels + total_path
-
-        current_id = prev_id
-
-    return total_path

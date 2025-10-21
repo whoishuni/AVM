@@ -24,10 +24,10 @@ from gui.markdown_dialog import YC_MarkdownDialog
 from core.image_processing import (
     create_enhanced_vessel_masks, create_maximum_intensity_projection,
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
-    create_combined_identity_map, generate_mask_steps,
-    process_mip_and_build_graph
+    create_combined_identity_map, generate_mask_steps
 )
-from core.pathfinding import find_path_astar, find_path_astar_graph
+from core.pathfinding import find_path_astar, find_path_in_flow_graph
+from core.flow_analyzer import FlowAnalyzer
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
     convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
@@ -86,6 +86,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.base_mask_projection: Optional[np.ndarray] = None
         self.temporal_cost_map: Optional[np.ndarray] = None
         self.vessel_graph = None
+        self.flow_graph = None
+        self.flow_analyzer: Optional[FlowAnalyzer] = None
         self.current_frame_index: int = 0
         self.path_points_info: List[Dict[str, Any]] = []
         self.app_state: AppState = AppState.IDLE
@@ -312,6 +314,15 @@ class YC_VesselTracerApp(QMainWindow):
         group1_layout.addWidget(self.btn_select_folder)
         right_controls_layout.addWidget(self.group_load)
 
+        # Group 2: Flow Analysis
+        self.group_flow = QGroupBox("Step 2: Flow Analysis")
+        group2_layout = QVBoxLayout(self.group_flow)
+        self.btn_analyze_flow = QPushButton("Analyze Flow")
+        self.btn_play_flow_animation = QPushButton("Play Flow Animation")
+        group2_layout.addWidget(self.btn_analyze_flow)
+        group2_layout.addWidget(self.btn_play_flow_animation)
+        right_controls_layout.addWidget(self.group_flow)
+
         # Group 2: Configure
         self.group_configure = QGroupBox()
         group2_layout = QVBoxLayout(self.group_configure)
@@ -434,6 +445,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_reset_view.clicked.connect(self.image_label.reset_zoom)
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
+        self.btn_analyze_flow.clicked.connect(self.analyze_flow)
+        self.btn_play_flow_animation.clicked.connect(self.play_flow_animation)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
         self.packaging_action.triggered.connect(self.handle_packaging_action)
 
@@ -441,16 +454,22 @@ class YC_VesselTracerApp(QMainWindow):
         is_interactive = self.app_state != AppState.PROCESSING
         # State configurations with translatable keys
         state_configs = {
-            AppState.IDLE: {"main_action_key": "start_marking", "main_action_enabled": False, "info_key": "info_idle", "status_key": "Ready", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": True},
-            AppState.LOADED: {"main_action_key": "start_marking", "main_action_enabled": True, "info_key": "info_loaded", "status_key": "status_loaded", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": True},
-            AppState.MARKING_PATH: {"main_action_key": "confirm_points", "main_action_enabled": len(self.path_points_info) >= 2, "info_key": "info_marking", "status_key": "status_marking", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False},
-            AppState.RANGE_CONFIRMED: {"main_action_key": "run_analysis", "main_action_enabled": True, "info_key": "info_confirmed", "status_key": "status_confirmed", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False},
-            AppState.PROCESSING: {"main_action_key": "processing", "main_action_enabled": False, "info_key": "info_processing", "status_key": "status_processing", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False},
-            AppState.DONE: {"main_action_key": "analysis_complete", "main_action_enabled": False, "info_key": "info_done", "status_key": "status_done", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False}
+            AppState.IDLE: {"main_action_key": "start_marking", "main_action_enabled": False, "info_key": "info_idle", "status_key": "Ready", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": True, "flow_visible": False},
+            AppState.LOADED: {"main_action_key": "start_marking", "main_action_enabled": False, "info_key": "info_loaded", "status_key": "status_loaded", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": True, "flow_visible": True, "analyze_flow_enabled": True, "play_flow_enabled": False},
+            AppState.ANALYZING_FLOW: {"main_action_key": "start_marking", "main_action_enabled": False, "info_key": "Analyzing flow...", "status_key": "Analyzing flow...", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False, "flow_visible": True, "analyze_flow_enabled": False, "play_flow_enabled": False},
+            AppState.FLOW_ANALYZED: {"main_action_key": "start_marking", "main_action_enabled": True, "info_key": "Flow analyzed. Ready to mark path.", "status_key": "Flow analyzed", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False, "flow_visible": True, "analyze_flow_enabled": True, "play_flow_enabled": True},
+            AppState.MARKING_PATH: {"main_action_key": "confirm_points", "main_action_enabled": len(self.path_points_info) >= 2, "info_key": "info_marking", "status_key": "status_marking", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False, "flow_visible": True, "analyze_flow_enabled": False, "play_flow_enabled": True},
+            AppState.RANGE_CONFIRMED: {"main_action_key": "run_analysis", "main_action_enabled": True, "info_key": "info_confirmed", "status_key": "status_confirmed", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False, "flow_visible": False},
+            AppState.PROCESSING: {"main_action_key": "processing", "main_action_enabled": False, "info_key": "info_processing", "status_key": "status_processing", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False, "flow_visible": False},
+            AppState.DONE: {"main_action_key": "analysis_complete", "main_action_enabled": False, "info_key": "info_done", "status_key": "status_done", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False, "flow_visible": False}
         }
         config = state_configs.get(self.app_state, state_configs[AppState.IDLE])
         self.btn_main_action.setText(self.tr(config["main_action_key"]))
         self.btn_main_action.setEnabled(config["main_action_enabled"] and is_interactive)
+
+        self.group_flow.setVisible(config.get("flow_visible", False))
+        self.btn_analyze_flow.setEnabled(config.get("analyze_flow_enabled", False))
+        self.btn_play_flow_animation.setEnabled(config.get("play_flow_enabled", False))
 
         # Dynamic info text formatting
         info_text = self.tr(config["info_key"], len(self.path_points_info), self.smoothing_level)
@@ -538,7 +557,7 @@ class YC_VesselTracerApp(QMainWindow):
         return display_img_bgr
 
     def handle_main_action(self):
-        if self.app_state == AppState.LOADED:
+        if self.app_state == AppState.FLOW_ANALYZED:
             self.app_state = AppState.MARKING_PATH
         elif self.app_state == AppState.MARKING_PATH:
             if len(self.path_points_info) < 2:
@@ -615,16 +634,17 @@ class YC_VesselTracerApp(QMainWindow):
             self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
 
     def show_segmented_path_preview(self):
-        if self.app_state != AppState.RANGE_CONFIRMED: return
-        if self.base_mask_projection is not None:
-            self.image_label.setPixmap(convert_np_to_pixmap(self.overlay_points_on_image(self.base_mask_projection)))
-            self.statusBar().showMessage("Showing cached vessel mask.")
-            return
-        if self.prepare_and_generate_masks():
-            self.image_label.setPixmap(convert_np_to_pixmap(self.overlay_points_on_image(self.base_mask_projection)))
-            self.statusBar().showMessage("Vessel mask generated and displayed.")
-        else:
-            QMessageBox.warning(self, "Error", "Failed to generate vessel mask.")
+        # This function is now called by start_analysis() after masks are prepared.
+        # It no longer needs to generate masks itself.
+        if self.base_mask_projection is None:
+             if not self.prepare_and_generate_masks():
+                 QMessageBox.warning(self, "Preview Error", "Could not generate masks for preview.")
+                 return
+
+        final_mask_color = cv2.cvtColor(self.base_mask_projection, cv2.COLOR_GRAY2BGR)
+        self.image_label.setPixmap(convert_np_to_pixmap(self.overlay_points_on_image(final_mask_color)))
+        self.statusBar().showMessage("Showing generated vessel mask.")
+
 
     def prepare_and_generate_masks(self) -> bool:
         frame_range = self._get_frame_range(for_processing=True)
@@ -639,6 +659,8 @@ class YC_VesselTracerApp(QMainWindow):
         if masks and updater.is_running:
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
+            # The following maps are not directly used by the new flow-based pathfinding,
+            # but might be useful for 3D view or other analyses. We can keep them for now.
             self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.params["PATHFINDING_OBSTACLE_COST"])
             self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, images_subset, self.params)
             return True
@@ -664,16 +686,10 @@ class YC_VesselTracerApp(QMainWindow):
             self.update_ui_for_state()
             return
 
-        mask_pixels = [find_closest_pixel_on_mask(p["point"], final_mask, self.params["MAX_NODE_SEARCH_RADIUS"]) for p in self.path_points_info]
-        if not all(mask_pixels):
-            QMessageBox.warning(self, "Pathfinding Failed", "Could not locate all marked points on the vessel mask. Try adjusting smoothing or re-marking points.")
-            self.app_state = AppState.RANGE_CONFIRMED
-            self.update_ui_for_state()
-            return
+        # With the new flow-based approach, the pathfinding operates on the flow graph directly.
+        self.show_full_analysis_steps()
 
-        self.show_full_analysis_steps(final_mask, mask_pixels)
-
-    def show_full_analysis_steps(self, final_mask, mask_pixels):
+    def show_full_analysis_steps(self):
         self.statusBar().showMessage(self.tr("info_processing"))
         QApplication.processEvents()
         steps = []
@@ -682,74 +698,64 @@ class YC_VesselTracerApp(QMainWindow):
         start_f, end_f = frame_range
         base_original_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
 
-        mask_steps_data = generate_mask_steps(base_original_pip, self.smoothing_level, self.params, self.global_background_color)
-        for img, desc in mask_steps_data:
-            steps.append((convert_np_to_pixmap(img), f"Mask Generation - {desc}"))
-
-        self.layered_vessel_mask = create_vessel_layers(final_mask, base_original_pip)
-        if self.layered_vessel_mask is not None:
-            normalized_layers = cv2.normalize(self.layered_vessel_mask, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-            layer_heatmap = cv2.applyColorMap(normalized_layers, cv2.COLORMAP_JET)
-            layer_heatmap[self.layered_vessel_mask == 0] = [0, 0, 0]
-            steps.append((convert_np_to_pixmap(layer_heatmap), "Vessel Layering (Z-depth)"))
-
-        combined_identity_map = create_combined_identity_map(self.vessel_identity_map, self.layered_vessel_mask)
-
-        width_map = cv2.distanceTransform(final_mask.astype(np.uint8), cv2.DIST_L2, 5)
-
-        # --- Build the vessel graph ---
-        skeleton, self.vessel_graph = process_mip_and_build_graph(final_mask, self.params)
-        if self.vessel_graph is None or skeleton is None:
-            QMessageBox.warning(self, "Graph Error", "Failed to build the vessel graph.")
-            self.app_state = AppState.RANGE_CONFIRMED
+        # --- Pathfinding using the new Flow Graph ---
+        if self.flow_graph is None or self.flow_analyzer is None:
+            QMessageBox.critical(self, "Error", "Flow analysis has not been run. Please analyze flow first.")
+            self.app_state = AppState.LOADED
             self.update_ui_for_state()
             return
 
-        # Visualize the skeleton and graph nodes
-        graph_visualization = cv2.cvtColor(skeleton, cv2.COLOR_GRAY2BGR)
-        for node_id, node in self.vessel_graph.nodes.items():
-            color = (0, 0, 255) if node.type == 'junction' else (0, 255, 0)
-            cv2.circle(graph_visualization, (node.x, node.y), 3, color, -1)
-        steps.append((convert_np_to_pixmap(graph_visualization), "Vessel Graph (Junctions: Red, Endpoints: Green)"))
+        all_path_segments = []
+        points_info = self.path_points_info
 
-        self.statusBar().showMessage(self.tr("info_processing"))
-        QApplication.processEvents()
+        for i in range(len(points_info) - 1):
+            start_info = points_info[i]
+            end_info = points_info[i+1]
 
-        all_found_paths = []
-        # Find path using the new graph-based A*
-        for i in range(len(mask_pixels) - 1):
-            start_node = self.vessel_graph.find_closest_node(mask_pixels[i])
-            end_node = self.vessel_graph.find_closest_node(mask_pixels[i+1])
+            path_segment = find_path_in_flow_graph(
+                self.flow_graph,
+                start_info['point'], start_info['frame'],
+                end_info['point'], end_info['frame'],
+                self.params["MAX_NODE_SEARCH_RADIUS"]
+            )
 
-            if start_node is None or end_node is None:
-                QMessageBox.warning(self, "Pathfinding Error", f"Could not map points {i} and {i+1} to the vessel graph.")
-                all_found_paths = [] # Invalidate paths
-                break
-
-            path = find_path_astar_graph(self.vessel_graph, start_node, end_node, width_map, combined_identity_map, self.params)
-
-            if path:
-                all_found_paths.append(path)
+            if path_segment:
+                all_path_segments.append(path_segment)
             else:
-                all_found_paths = [] # Invalidate paths if any segment fails
-                break
+                QMessageBox.warning(self, "Pathfinding Failed", f"Could not find a continuous path between point {i+1} and point {i+2}.")
+                self.final_paths = None
+                self.app_state = AppState.RANGE_CONFIRMED
+                self.update_ui_for_state()
+                return
 
-        if all_found_paths:
-            self.final_paths = [all_found_paths[0]]
-            self.alternative_paths = all_found_paths[1:]
+        # Stitch the path segments together
+        full_path = []
+        if all_path_segments:
+            for segment in all_path_segments:
+                full_path.extend(segment)
+            self.final_paths = [full_path]
+            self.alternative_paths = []
         else:
             QMessageBox.warning(self, "Pathfinding Failed", "Could not find a continuous path between all points.")
             self.app_state = AppState.RANGE_CONFIRMED
             self.update_ui_for_state()
             return
 
-        path_base_image = cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR)
-        for path in self.final_paths:
-            path_points = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(path_base_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
+        # --- Visualization for Step Viewer ---
+        mask_steps_data = generate_mask_steps(base_original_pip, self.smoothing_level, self.params, self.global_background_color)
+        for img, desc in mask_steps_data:
+            steps.append((convert_np_to_pixmap(img), f"Mask Generation - {desc}"))
 
-        self.animation_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map}
-        steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", self.animation_data))
+        flow_visualization = self.flow_analyzer.visualize()
+        if flow_visualization is not None:
+            steps.append((convert_np_to_pixmap(flow_visualization), "Blood Flow Graph"))
+
+        path_base_image = cv2.cvtColor(base_original_pip, cv2.COLOR_GRAY2BGR)
+        if self.final_paths and self.final_paths[0]:
+            path_points = np.array(self.final_paths[0], dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(path_base_image, [path_points], isClosed=False, color=(50, 255, 50), thickness=2)
+
+        steps.append((convert_np_to_pixmap(path_base_image), "Flow-Based Path Result"))
 
         self.generate_final_path_image(base_original_pip)
         steps.append((convert_np_to_pixmap(self.final_path_image), "Final Result"))
@@ -920,6 +926,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.base_mask_projection = None
         self.temporal_cost_map = None
         self.vessel_graph = None
+        self.flow_graph = None
         self.path_points_info = []
         self.smoothing_level = 4
         self.visible_paths = []
@@ -1082,6 +1089,92 @@ class YC_VesselTracerApp(QMainWindow):
             QMessageBox.warning(self, "更新錯誤", "無法檢查更新。請確認您已安裝 Git 並將其加入系統路徑中。")
         except Exception as e:
             QMessageBox.critical(self, "更新錯誤", f"檢查更新時發生未知錯誤：\n{e}")
+
+    def analyze_flow(self):
+        self.app_state = AppState.ANALYZING_FLOW
+        self.update_ui_for_state()
+        QApplication.processEvents()
+
+        progress = QProgressDialog("Analyzing vessel flow...", "Cancel", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        # Step 1: Generate masks (takes ~80% of the time)
+        updater = ProgressUpdater(progress, 0, 80)
+        if self.vessel_masks is None:
+            masks = create_enhanced_vessel_masks(self.images, self.noise_rois, self.global_background_color, self.params, self.smoothing_level, updater)
+            if masks is None or not updater.is_running:
+                QMessageBox.warning(self, "Analysis Cancelled", "Vessel mask generation was cancelled or failed.")
+                self.app_state = AppState.LOADED
+                self.update_ui_for_state()
+                return
+            self.vessel_masks = masks
+        else:
+            updater.finish() # Masks were already generated
+
+        if progress.wasCanceled(): return
+
+        # Step 2: Analyze flow (takes ~20% of the time)
+        progress.setLabelText("Building flow graph...")
+        self.flow_analyzer = FlowAnalyzer(self.vessel_masks, self.images, self.params)
+        self.flow_graph = self.flow_analyzer.analyze()
+        progress.setValue(100)
+
+        if self.flow_graph:
+            self.app_state = AppState.FLOW_ANALYZED
+        else:
+            QMessageBox.warning(self, "Error", "Could not build the vessel flow graph.")
+            self.app_state = AppState.LOADED
+
+        self.update_ui_for_state()
+
+    def play_flow_animation(self):
+        if not self.vessel_masks or not self.flow_analyzer or not self.flow_graph:
+            QMessageBox.warning(self, "Not Ready", "Please run Flow Analysis first.")
+            return
+
+        progress = QProgressDialog("Playing Flow Animation...", "Cancel", 0, len(self.images), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        # Generate the flow visualization once
+        flow_visualization_base = self.flow_analyzer.visualize()
+        if flow_visualization_base is None:
+            QMessageBox.warning(self, "Error", "Could not generate flow visualization.")
+            return
+
+        for i, frame in enumerate(self.images):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+
+            # Create the display image for the current frame
+            display_img = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+            # Overlay the flow visualization with some transparency
+            # We can make the parts of the flow viz that are not in the current frame more transparent
+            overlay = flow_visualization_base.copy()
+
+            # Create a mask for the current frame's nodes
+            current_frame_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for node in self.flow_analyzer.nodes_by_frame[i]:
+                current_frame_mask[node.pixels[:, 0], node.pixels[:, 1]] = 1
+
+            # Make other parts of the overlay more transparent
+            inactive_mask = (np.all(overlay != [0,0,0], axis=-1)) & (current_frame_mask == 0)
+            overlay[inactive_mask] = (overlay[inactive_mask] * 0.3).astype(np.uint8)
+
+            # Blend the overlay with the original frame
+            mask = np.any(overlay > 0, axis=-1)
+            display_img[mask] = cv2.addWeighted(display_img[mask], 0.6, overlay[mask], 0.4, 0)
+
+            # Draw a frame counter
+            cv2.putText(display_img, f"Frame: {i}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+
+            self.image_label.setPixmap(convert_np_to_pixmap(display_img))
+            QApplication.processEvents()
+
+        progress.setValue(len(self.images))
+        # After animation, restore the default view for the current state
+        self.update_frame_display(self.current_frame_index)
 
     def closeEvent(self, event):
         self.reset_system()
