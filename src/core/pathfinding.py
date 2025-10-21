@@ -106,7 +106,7 @@ def find_path_astar(
                     current_id = identity_map[current]
                     neighbor_id = identity_map[neighbor]
                     if current_id > 0 and neighbor_id > 0 and current_id != neighbor_id:
-                        cross_vessel_penalty = params["CROSS_VESSEL_PENALTY"]
+                        cross_vessel_penalty = params["CROSS_VESSEL_PENALTY"] * 10
 
                 # 2. Turn Penalty
                 turn_penalty = params["TURN_PENALTY_WEIGHT"] * (1.0 - cosine_similarity)

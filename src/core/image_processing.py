@@ -179,35 +179,46 @@ def create_vessel_layers(mask: np.ndarray, original_mip: np.ndarray) -> Optional
 
 def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
     """Builds a map that assigns a unique, persistent ID to each vessel segment across frames."""
-    if not masks: return None
+    if not masks:
+        return None
 
     h, w = masks[0].shape
     identity_map = np.zeros((h, w), dtype=np.int32)
     next_vessel_id = 1
 
+    # Process the first frame to initialize vessel identities
     if np.any(masks[0]):
         num_labels, labels = cv2.connectedComponents(masks[0])
         for label_idx in range(1, num_labels):
             identity_map[labels == label_idx] = next_vessel_id
             next_vessel_id += 1
 
+    # Propagate identities to subsequent frames
     for i in range(1, len(masks)):
-        new_growth_mask = cv2.subtract(masks[i], masks[i-1])
-        if not np.any(new_growth_mask):
+        current_mask = masks[i]
+        # Find components in the current frame
+        num_labels, labels = cv2.connectedComponents(current_mask)
+        if num_labels <= 1:
             continue
 
-        num_labels, labels = cv2.connectedComponents(new_growth_mask)
         for label_idx in range(1, num_labels):
             component_mask = (labels == label_idx)
-            boundary_mask = component_mask & (masks[i-1] > 0)
-            overlap_pixels = identity_map[boundary_mask]
-            overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
 
-            if len(overlapping_ids) > 0:
+            # Find overlap with the identity_map from the previous state
+            # The identity_map already contains IDs from all previous frames up to i-1
+            overlap_pixels = identity_map[component_mask]
+
+            # Find unique, non-zero IDs in the overlapping region
+            overlapping_ids = overlap_pixels[overlap_pixels > 0]
+
+            if overlapping_ids.size > 0:
+                # If there's an overlap, find the ID with the largest area of overlap
                 unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
                 chosen_id = unique_ids[np.argmax(counts)]
+                # Update the identity map with the chosen ID for the new component area
                 identity_map[component_mask] = chosen_id
             else:
+                # If no overlap, it's a new vessel segment
                 identity_map[component_mask] = next_vessel_id
                 next_vessel_id += 1
 
