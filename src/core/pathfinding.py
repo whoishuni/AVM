@@ -3,7 +3,120 @@ import heapq
 import math
 from typing import Optional, List, Tuple, Callable, Dict
 from collections import deque
+import networkx as nx
+
 from .flow_analyzer import FlowNode
+from .vessel_graph import VesselGraph
+
+
+def find_path_on_graph(
+    vessel_graph: VesselGraph,
+    start_pixel_qpoint: any,  # Actually a QPoint
+    start_frame: int,
+    end_pixel_qpoint: any,    # Actually a QPoint
+    end_frame: int,
+    max_search_radius: int
+) -> Optional[List[Tuple[int, int]]]:
+    """
+    Finds a path in the vessel graph from a start point to an end point using A*.
+    """
+    start_pixel = (start_pixel_qpoint.y(), start_pixel_qpoint.x())
+    end_pixel = (end_pixel_qpoint.y(), end_pixel_qpoint.x())
+
+    # 1. Find the closest graph nodes to the start and end pixels
+    start_node = _find_closest_graph_node(vessel_graph, start_pixel, start_frame, max_search_radius)
+    end_node = _find_closest_graph_node(vessel_graph, end_pixel, end_frame, max_search_radius)
+
+    if start_node is None:
+        print(f"Error: Could not map start point {start_pixel} in frame {start_frame} to a graph node.")
+        return None
+    if end_node is None:
+        print(f"Error: Could not map end point {end_pixel} in frame {end_frame} to a graph node.")
+        return None
+
+    # 2. Define cost and heuristic functions for A*
+    def cost_func(u, v, edge_data):
+        # The cost of traversing an edge is its length in pixels
+        return len(edge_data.get('pixels', []))
+
+    def heuristic_func(u, v):
+        # Use Euclidean distance as the heuristic
+        pos1 = np.array(vessel_graph.graph.nodes[u]['pos'])
+        pos2 = np.array(vessel_graph.graph.nodes[v]['pos'])
+        return np.linalg.norm(pos1 - pos2)
+
+    # 3. Run A* on the graph
+    try:
+        node_path = nx.astar_path(
+            vessel_graph.graph,
+            source=start_node,
+            target=end_node,
+            heuristic=heuristic_func,
+            weight=cost_func
+        )
+    except nx.NetworkXNoPath:
+        print("No path found between the specified points in the vessel graph.")
+        return None
+
+    # 4. Reconstruct the pixel path from the node path
+    if not node_path or len(node_path) < 2:
+        return None
+
+    pixel_path = []
+    for i in range(len(node_path) - 1):
+        u = node_path[i]
+        v = node_path[i+1]
+        edge_data = vessel_graph.graph.get_edge_data(u, v)
+        if 'pixels' in edge_data:
+            # Ensure the pixel path flows in the correct direction
+            segment_pixels = edge_data['pixels']
+            if tuple(segment_pixels[0]) == vessel_graph.graph.nodes[u]['pos']:
+                pixel_path.extend(segment_pixels)
+            else:
+                pixel_path.extend(segment_pixels[::-1])
+
+    return pixel_path
+
+from scipy.spatial import KDTree
+
+def _find_closest_graph_node(
+    vessel_graph: VesselGraph,
+    pixel: Tuple[int, int],
+    frame_index: int,
+    max_dist: int
+) -> Optional[int]:
+    """
+    Finds the closest node in the VesselGraph to a pixel within a given frame
+    using a KDTree for efficient searching.
+    """
+    # Filter nodes belonging to the specific frame
+    frame_nodes = [
+        (node_id, data['pos'])
+        for node_id, data in vessel_graph.graph.nodes(data=True)
+        if data.get('frame') == frame_index
+    ]
+
+    if not frame_nodes:
+        return None
+
+    node_ids, positions_yx = zip(*frame_nodes)
+
+    # KDTree works with (x, y) coordinates, so we need to swap them
+    positions_xy = [(pos[1], pos[0]) for pos in positions_yx]
+    pixel_xy = (pixel[1], pixel[0])
+
+    # Create a KDTree from the node positions (x, y)
+    kdtree = KDTree(positions_xy)
+
+    # Query the KDTree for the nearest neighbor using the (x, y) pixel
+    distance, index = kdtree.query(pixel_xy)
+
+    # Check if the found node is within the maximum allowed distance
+    if distance <= max_dist:
+        return node_ids[index]
+
+    return None
+
 
 def find_path_in_flow_graph(
     flow_graph: Dict[str, FlowNode],

@@ -15,8 +15,8 @@ class AppState(Enum):
     """Defines the possible states of the application's finite state machine."""
     IDLE = auto()             # Waiting for images.
     LOADED = auto()           # Images loaded, ready for interaction.
-    ANALYZING_FLOW = auto()   # Analyzing the flow animation.
-    FLOW_ANALYZED = auto()    # Flow is analyzed, ready to play animation or mark points.
+    ANALYZING_VESSELS = auto()   # Analyzing the vessel graph.
+    VESSELS_ANALYZED = auto()    # Vessel graph is built, ready for interaction.
     MARKING_PATH = auto()     # User is actively marking points.
     RANGE_CONFIRMED = auto()  # Points confirmed, ready for analysis configuration.
     PROCESSING = auto()       # Busy with a background task.

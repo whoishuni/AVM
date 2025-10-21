@@ -16,6 +16,47 @@ from utils.threading import ProgressUpdater
 
 # --- Image Enhancement and Segmentation Functions ---
 
+def create_roi_mask(
+    images: List[np.ndarray],
+    threshold_factor: float = 2.0
+) -> Optional[np.ndarray]:
+    """
+    Creates a Region of Interest (ROI) mask by identifying areas with significant
+    temporal variation, indicating vessel activity.
+
+    Args:
+        images: A list of numpy arrays representing the image sequence.
+        threshold_factor: A multiplier for the mean standard deviation to set the
+                          binarization threshold. Higher values are more strict.
+
+    Returns:
+        A binary mask (np.ndarray) where pixels belonging to the ROI are 255,
+        or None if the input is invalid.
+    """
+    if not images:
+        return None
+
+    image_stack = np.stack(images, axis=0)
+
+    # Calculate the standard deviation along the time axis (axis 0)
+    std_dev_map = np.std(image_stack, axis=0)
+
+    # Use a threshold based on the mean standard deviation to capture active areas
+    threshold = np.mean(std_dev_map) * threshold_factor
+
+    # Normalize for creating a mask
+    std_dev_normalized = cv2.normalize(std_dev_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+    # Create a binary mask
+    _, roi_mask = cv2.threshold(std_dev_normalized, int(threshold), 255, cv2.THRESH_BINARY)
+
+    # Perform morphological opening to remove small noise speckles
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    roi_mask = cv2.morphologyEx(roi_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+    return roi_mask
+
+
 def remove_large_bright_areas(
     image: np.ndarray, bg_color: int, threshold_offset: int = 15, kernel_size: int = 15
 ) -> np.ndarray:

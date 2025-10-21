@@ -24,22 +24,9 @@ class YC_ParameterDialog(QDialog):
         param_meta = {
             "BG_REMOVAL_THRESHOLD_OFFSET": ("Offset from background color to detect bright areas.", int, 0, 100),
             "BG_REMOVAL_KERNEL_SIZE": ("Size of the kernel for removing bright areas (must be odd).", int, 1, 51),
-            "MAX_NODE_SEARCH_RADIUS": ("Max distance (px) to find a vessel pixel near a click.", int, 5, 200),
-            "MAX_GAP_BRIDGE_DISTANCE": ("Max distance (px) to connect broken vessel segments.", int, 5, 100),
-            "FORBIDDEN_ZONE_RADIUS": ("Radius (px) to prevent A* from immediately backtracking.", int, 0, 100),
-            "TIME_COST_WEIGHT": ("Weight for the temporal cost in A* pathfinding.", float, 0.0, 10.0),
-            "PATHFINDING_OBSTACLE_COST": ("Cost for non-vessel pixels (should be very high).", float, 1e6, 1e12),
-            "TURN_PENALTY_WEIGHT": ("Weight for the turn penalty in A* pathfinding.", float, 0.0, 500.0),
-            "DYNAMIC_COST_WEIGHT": ("Weight for dynamically adjusting cost based on path straightness.", float, 0.0, 50.0),
-            "STRAIGHT_PATH_THRESHOLD": ("Cosine similarity threshold to be considered 'straight'.", float, 0.0, 1.0),
-            "CROSS_VESSEL_PENALTY": ("High penalty for jumping between different vessels.", float, 1e4, 1e9),
-            "MAIN_VESSEL_WIDTH_TOLERANCE": ("Tolerance (%) for a vessel to be considered 'main'.", float, 0.0, 1.0),
-            "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": ("Multiplier for turn penalty in side branches.", float, 1.0, 50.0),
-            "DIRECTION_INERTIA_WEIGHT": ("Weight for the direction inertia penalty in graph-based A*.", float, 0.0, 500.0),
-            "OVERLAP_WEIGHT": ("Weight for pixel overlap in vessel identity matching.", float, 1.0, 10.0),
-            "DIRECTION_SIMILARITY_WEIGHT": ("Weight for direction similarity in vessel identity matching.", float, 0.0, 10.0),
-            "MAX_BRIGHTNESS_INCREASE_WEIGHT": ("Penalty for a segment becoming brighter vs its parent.", float, 0.0, 50.0),
-            "MAX_WIDTH_INCREASE_WEIGHT": ("Penalty for a segment becoming wider vs its parent.", float, 0.0, 50.0),
+            "MAX_NODE_SEARCH_RADIUS": ("Max distance (px) to find a graph node near a click.", int, 5, 200),
+            "MAX_GAP_BRIDGE_DISTANCE": ("Max distance (px) to connect broken vessel segments in the mask.", int, 5, 100),
+            "MAX_TEMPORAL_LINKING_DISTANCE": ("Max distance (px) to link vessel nodes between consecutive frames.", int, 5, 100),
         }
 
         for name, value in self.params.items():
