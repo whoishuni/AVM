@@ -13,7 +13,6 @@ except ImportError as e:
 
 # --- Local Project Imports ---
 from utils.threading import ProgressUpdater
-from .graph_builder import build_graph_from_skeleton, Graph
 
 # --- Image Enhancement and Segmentation Functions ---
 
@@ -323,37 +322,6 @@ def create_combined_identity_map(
             combined_map[y, x] = unique_pairs[pair]
 
     return combined_map
-
-def process_mip_and_build_graph(mip_image: np.ndarray, params: dict) -> Tuple[Optional[np.ndarray], Optional[Graph]]:
-    """
-    Processes the Maximum Intensity Projection image to create a skeleton and build a graph.
-
-    Args:
-        mip_image: The MIP image.
-        params: A dictionary of tuning parameters.
-
-    Returns:
-        A tuple containing the skeletonized image and the vessel graph.
-    """
-    if mip_image is None:
-        return None, None
-
-    # This is a simplified processing chain for the MIP
-    # It assumes the MIP is already enhanced. In a real scenario,
-    # some of the enhancement steps from create_enhanced_vessel_masks would be applied here.
-
-    _, binary_mask = cv2.threshold(mip_image, 30, 255, cv2.THRESH_BINARY)
-    bridged_mask = bridge_gaps_in_mask(binary_mask, params.get("MAX_GAP_BRIDGE_DISTANCE", 15))
-
-    # Skeletonization
-    skeleton = skeletonize(bridged_mask / 255).astype(np.uint8) * 255
-    if not np.any(skeleton):
-        return skeleton, None
-
-    # Graph building
-    vessel_graph = build_graph_from_skeleton(skeleton)
-
-    return skeleton, vessel_graph
 
 
 def generate_mask_steps(image: np.ndarray, smoothing_level: int, params: dict, bg_color: int) -> List[Tuple[np.ndarray, str]]:
