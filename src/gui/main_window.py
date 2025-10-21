@@ -24,9 +24,10 @@ from gui.markdown_dialog import YC_MarkdownDialog
 from core.image_processing import (
     create_enhanced_vessel_masks, create_maximum_intensity_projection,
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
-    create_combined_identity_map, generate_mask_steps
+    create_combined_identity_map, generate_mask_steps,
+    process_mip_and_build_graph
 )
-from core.pathfinding import find_path_astar
+from core.pathfinding import find_path_astar, find_path_astar_graph
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
     convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
@@ -47,7 +48,12 @@ class YC_VesselTracerApp(QMainWindow):
         "PATHFINDING_OBSTACLE_COST": 1e9, "TURN_PENALTY_WEIGHT": 50.0,
         "DYNAMIC_COST_WEIGHT": 5.0, "STRAIGHT_PATH_THRESHOLD": 0.9,
         "CROSS_VESSEL_PENALTY": 1e6, "MAIN_VESSEL_WIDTH_TOLERANCE": 0.30,
-        "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0
+        "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": 10.0,
+        "DIRECTION_INERTIA_WEIGHT": 100.0,
+        "OVERLAP_WEIGHT": 2.0,
+        "DIRECTION_SIMILARITY_WEIGHT": 1.0,
+        "MAX_BRIGHTNESS_INCREASE_WEIGHT": 10.0,
+        "MAX_WIDTH_INCREASE_WEIGHT": 10.0
     }
 
     def __init__(self, language="en"):
@@ -79,6 +85,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.final_path_base_image: Optional[np.ndarray] = None
         self.base_mask_projection: Optional[np.ndarray] = None
         self.temporal_cost_map: Optional[np.ndarray] = None
+        self.vessel_graph = None
         self.current_frame_index: int = 0
         self.path_points_info: List[Dict[str, Any]] = []
         self.app_state: AppState = AppState.IDLE
@@ -633,7 +640,7 @@ class YC_VesselTracerApp(QMainWindow):
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
             self.temporal_cost_map = create_temporal_cost_map(self.vessel_masks, self.params["PATHFINDING_OBSTACLE_COST"])
-            self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks)
+            self.vessel_identity_map = build_vessel_identity_map(self.vessel_masks, images_subset, self.params)
             return True
         else:
             self.vessel_masks = None
@@ -689,28 +696,42 @@ class YC_VesselTracerApp(QMainWindow):
         combined_identity_map = create_combined_identity_map(self.vessel_identity_map, self.layered_vessel_mask)
 
         width_map = cv2.distanceTransform(final_mask.astype(np.uint8), cv2.DIST_L2, 5)
-        main_vessel_width = 2 * width_map[mask_pixels[0]] if width_map is not None else 0
+
+        # --- Build the vessel graph ---
+        skeleton, self.vessel_graph = process_mip_and_build_graph(final_mask, self.params)
+        if self.vessel_graph is None or skeleton is None:
+            QMessageBox.warning(self, "Graph Error", "Failed to build the vessel graph.")
+            self.app_state = AppState.RANGE_CONFIRMED
+            self.update_ui_for_state()
+            return
+
+        # Visualize the skeleton and graph nodes
+        graph_visualization = cv2.cvtColor(skeleton, cv2.COLOR_GRAY2BGR)
+        for node_id, node in self.vessel_graph.nodes.items():
+            color = (0, 0, 255) if node.type == 'junction' else (0, 255, 0)
+            cv2.circle(graph_visualization, (node.x, node.y), 3, color, -1)
+        steps.append((convert_np_to_pixmap(graph_visualization), "Vessel Graph (Junctions: Red, Endpoints: Green)"))
 
         self.statusBar().showMessage(self.tr("info_processing"))
         QApplication.processEvents()
 
-        cumulative_cost_map = self.temporal_cost_map.copy()
         all_found_paths = []
-        for _ in range(3):
-            full_path = []
-            is_path_complete = True
-            for i in range(len(mask_pixels) - 1):
-                segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params)
-                if segment:
-                    full_path.extend(segment if i == 0 else segment[1:])
-                else:
-                    is_path_complete = False
-                    break
-            if is_path_complete and full_path:
-                all_found_paths.append(full_path)
-                for y, x in full_path:
-                    cumulative_cost_map[y, x] += 1e7
+        # Find path using the new graph-based A*
+        for i in range(len(mask_pixels) - 1):
+            start_node = self.vessel_graph.find_closest_node(mask_pixels[i])
+            end_node = self.vessel_graph.find_closest_node(mask_pixels[i+1])
+
+            if start_node is None or end_node is None:
+                QMessageBox.warning(self, "Pathfinding Error", f"Could not map points {i} and {i+1} to the vessel graph.")
+                all_found_paths = [] # Invalidate paths
+                break
+
+            path = find_path_astar_graph(self.vessel_graph, start_node, end_node, width_map, combined_identity_map, self.params)
+
+            if path:
+                all_found_paths.append(path)
             else:
+                all_found_paths = [] # Invalidate paths if any segment fails
                 break
 
         if all_found_paths:
@@ -727,7 +748,7 @@ class YC_VesselTracerApp(QMainWindow):
             path_points = np.array(path, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(path_base_image, [path_points[:,:,::-1]], isClosed=False, color=(50, 255, 50), thickness=2)
 
-        self.animation_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map, "main_vessel_width": main_vessel_width}
+        self.animation_data = {"type": "animation", "costmap": self.temporal_cost_map, "pixels": mask_pixels, "baseimage": cv2.cvtColor(final_mask, cv2.COLOR_GRAY2BGR), "identity_map": combined_identity_map, "width_map": width_map}
         steps.append((convert_np_to_pixmap(path_base_image), "A* Search Result (Click Replay)", self.animation_data))
 
         self.generate_final_path_image(base_original_pip)
@@ -898,6 +919,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.final_path_base_image = None
         self.base_mask_projection = None
         self.temporal_cost_map = None
+        self.vessel_graph = None
         self.path_points_info = []
         self.smoothing_level = 4
         self.visible_paths = []

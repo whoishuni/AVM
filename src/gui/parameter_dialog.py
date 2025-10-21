@@ -36,6 +36,10 @@ class YC_ParameterDialog(QDialog):
             "MAIN_VESSEL_WIDTH_TOLERANCE": ("Tolerance (%) for a vessel to be considered 'main'.", float, 0.0, 1.0),
             "SIDE_BRANCH_TURN_PENALTY_MULTIPLIER": ("Multiplier for turn penalty in side branches.", float, 1.0, 50.0),
             "DIRECTION_INERTIA_WEIGHT": ("Weight for the direction inertia penalty in graph-based A*.", float, 0.0, 500.0),
+            "OVERLAP_WEIGHT": ("Weight for pixel overlap in vessel identity matching.", float, 1.0, 10.0),
+            "DIRECTION_SIMILARITY_WEIGHT": ("Weight for direction similarity in vessel identity matching.", float, 0.0, 10.0),
+            "MAX_BRIGHTNESS_INCREASE_WEIGHT": ("Penalty for a segment becoming brighter vs its parent.", float, 0.0, 50.0),
+            "MAX_WIDTH_INCREASE_WEIGHT": ("Penalty for a segment becoming wider vs its parent.", float, 0.0, 50.0),
         }
 
         for name, value in self.params.items():

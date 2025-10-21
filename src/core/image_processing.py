@@ -187,82 +187,115 @@ def _get_component_orientation(mask: np.ndarray) -> Optional[np.ndarray]:
     mean, eigenvectors = cv2.PCACompute(coords, mean=None)
     return eigenvectors[0]
 
-def build_vessel_identity_map(masks: List[np.ndarray]) -> Optional[np.ndarray]:
+def build_vessel_identity_map(
+    masks: List[np.ndarray],
+    images: List[np.ndarray],
+    params: dict
+) -> Optional[np.ndarray]:
     """
     Builds a map assigning a unique, persistent ID to each vessel segment,
-    considering overlap, and orientation similarity.
+    considering overlap, orientation, width, and intensity similarity.
     """
-    if not masks: return None
+    if not masks or not images: return None
+    if len(masks) != len(images):
+        print("Warning: Mismatch between number of masks and images.")
+        return None
 
     h, w = masks[0].shape
     identity_map = np.zeros((h, w), dtype=np.int32)
     next_vessel_id = 1
-    vessel_orientations = {}  # Store orientation vector for each vessel ID
 
-    # --- Initialize with the first frame ---
+    vessel_orientations = {}
+    vessel_avg_widths = {}
+    vessel_avg_intensities = {}
+
+    width_maps = [cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 5) * 2 for m in masks]
+
     if np.any(masks[0]):
         num_labels, labels = cv2.connectedComponents(masks[0])
+        current_image = images[0]
+        current_width_map = width_maps[0]
+
         for label_idx in range(1, num_labels):
             component_mask = (labels == label_idx)
             identity_map[component_mask] = next_vessel_id
+
             orientation = _get_component_orientation(component_mask)
             if orientation is not None:
                 vessel_orientations[next_vessel_id] = orientation
+
+            vessel_avg_widths[next_vessel_id] = np.mean(current_width_map[component_mask])
+            vessel_avg_intensities[next_vessel_id] = np.mean(current_image[component_mask])
             next_vessel_id += 1
 
-    # --- Process subsequent frames ---
     for i in range(1, len(masks)):
-        # Find new vessel growth
-        new_growth_mask = cv2.subtract(masks[i], masks[i - 1])
+        prev_mask = masks[i-1]
+        current_mask = masks[i]
+        current_image = images[i]
+        current_width_map = width_maps[i]
+
+        new_growth_mask = cv2.subtract(current_mask, prev_mask)
         if not np.any(new_growth_mask):
             continue
 
         num_labels, labels = cv2.connectedComponents(new_growth_mask)
         for label_idx in range(1, num_labels):
             component_mask = (labels == label_idx)
+
             component_orientation = _get_component_orientation(component_mask)
+            component_avg_width = np.mean(current_width_map[component_mask])
+            component_avg_intensity = np.mean(current_image[component_mask])
 
-            # Find overlapping IDs from the previous frame
-            boundary_mask = component_mask & (masks[i - 1] > 0)
-            overlap_pixels = identity_map[boundary_mask]
-            overlapping_ids = np.unique(overlap_pixels[overlap_pixels > 0])
+            overlap_region_mask = component_mask & (prev_mask > 0)
 
-            if len(overlapping_ids) == 0:
-                # This is a completely new vessel
+            if not np.any(overlap_region_mask):
                 chosen_id = next_vessel_id
                 next_vessel_id += 1
             else:
-                # Score potential parent IDs based on overlap and orientation
-                best_score = -1
-                chosen_id = -1
+                overlapping_ids_pixels = identity_map[overlap_region_mask]
+                unique_ids, counts = np.unique(overlapping_ids_pixels[overlapping_ids_pixels > 0], return_counts=True)
 
-                # Get overlap counts for all potential parents
-                unique_ids, counts = np.unique(overlapping_ids, return_counts=True)
-                overlap_scores = {uid: count for uid, count in zip(unique_ids, counts)}
+                if len(unique_ids) == 0:
+                    chosen_id = next_vessel_id
+                    next_vessel_id += 1
+                else:
+                    best_score = -float('inf')
+                    chosen_id = -1
 
-                for uid in unique_ids:
-                    overlap_score = overlap_scores.get(uid, 0)
+                    overlap_scores = {uid: count for uid, count in zip(unique_ids, counts)}
 
-                    # Calculate orientation similarity
-                    orientation_similarity = 0
-                    if component_orientation is not None and uid in vessel_orientations:
-                        vec1 = component_orientation
-                        vec2 = vessel_orientations[uid]
-                        # Cosine similarity: abs(dot_product) as direction can be flipped
-                        orientation_similarity = abs(np.dot(vec1, vec2))
+                    for uid in unique_ids:
+                        overlap_score = overlap_scores.get(uid, 0) / np.sum(counts)
 
-                    # Combine scores (weights can be tuned)
-                    # We prioritize overlap, but use orientation as a strong tie-breaker
-                    total_score = (overlap_score * 1.0) + (orientation_similarity * 0.5)
+                        orientation_similarity = 0
+                        if component_orientation is not None and uid in vessel_orientations:
+                            vec1 = component_orientation
+                            vec2 = vessel_orientations[uid]
+                            orientation_similarity = abs(np.dot(vec1, vec2))
 
-                    if total_score > best_score:
-                        best_score = total_score
-                        chosen_id = uid
+                        prev_width = vessel_avg_widths.get(uid, component_avg_width)
+                        width_increase_penalty = max(0, (component_avg_width - prev_width) / prev_width if prev_width > 0 else 0)
 
-            # Assign the chosen ID and update orientation map
+                        prev_intensity = vessel_avg_intensities.get(uid, component_avg_intensity)
+                        brightness_increase_penalty = max(0, (component_avg_intensity - prev_intensity) / prev_intensity if prev_intensity > 0 else 0)
+
+                        total_score = (
+                            overlap_score * params.get("OVERLAP_WEIGHT", 2.0) +
+                            orientation_similarity * params.get("DIRECTION_SIMILARITY_WEIGHT", 1.0) -
+                            width_increase_penalty * params.get("MAX_WIDTH_INCREASE_WEIGHT", 10.0) -
+                            brightness_increase_penalty * params.get("MAX_BRIGHTNESS_INCREASE_WEIGHT", 10.0)
+                        )
+
+                        if total_score > best_score:
+                            best_score = total_score
+                            chosen_id = uid
+
             identity_map[component_mask] = chosen_id
+
             if component_orientation is not None:
-                 vessel_orientations[chosen_id] = component_orientation
+                vessel_orientations[chosen_id] = component_orientation
+            vessel_avg_widths[chosen_id] = component_avg_width
+            vessel_avg_intensities[chosen_id] = component_avg_intensity
 
     return identity_map
 

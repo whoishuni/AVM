@@ -37,12 +37,6 @@ def find_path_astar(
         A list of (y, x) tuples representing the path, or None if no path is found.
     """
     obstacle_cost = params["PATHFINDING_OBSTACLE_COST"]
-    if vessel_graph and vessel_graph.nodes:
-        start_node = _find_nearest_node(start, vessel_graph)
-        end_node = _find_nearest_node(end, vessel_graph)
-        if start_node and end_node:
-            return find_path_astar_graph(vessel_graph, start_node, end_node, params)
-
     if cost_map[start] >= obstacle_cost or cost_map[end] >= obstacle_cost:
         return None
 
@@ -143,12 +137,29 @@ def find_path_astar_graph(
     graph: Graph,
     start_node: Node,
     end_node: Node,
+    width_map: np.ndarray,
+    identity_map: np.ndarray,
     params: dict
 ) -> Optional[List[Tuple[int, int]]]:
     """
     Finds the optimal path between two nodes in a graph using A*.
     This version incorporates a direction inertia penalty.
     """
+    # Pre-calculate edge properties if they don't exist
+    if not hasattr(graph, '_edge_properties_calculated'):
+        for edge in graph.edges:
+            pixel_coords = np.array(edge.pixels)
+            y_coords, x_coords = pixel_coords[:, 0], pixel_coords[:, 1]
+
+            edge.avg_width = np.mean(width_map[y_coords, x_coords])
+
+            ids = identity_map[y_coords, x_coords]
+            # Find the most frequent non-zero ID
+            unique_ids, counts = np.unique(ids[ids > 0], return_counts=True)
+            edge.vessel_id = unique_ids[np.argmax(counts)] if len(unique_ids) > 0 else 0
+        graph._edge_properties_calculated = True
+
+
     open_set = [(0, start_node.id, None)]  # (f_cost, node_id, incoming_edge_id)
     came_from = {}
     g_costs = {start_node.id: 0}
@@ -157,9 +168,10 @@ def find_path_astar_graph(
         _, current_id, incoming_edge_repr = heapq.heappop(open_set)
 
         if current_id == end_node.id:
-            return _reconstruct_graph_path(graph, came_from, current_id)
+            return _reconstruct_graph_path(graph, came_from, current_id, width_map, identity_map)
 
         current_node = graph.nodes[current_id]
+        incoming_edge = next((e for e in graph.edges if repr(e) == incoming_edge_repr), None)
 
         for edge in graph.adjacency[current_id]:
             neighbor_node = edge.node2 if edge.node1.id == current_id else edge.node1
@@ -167,35 +179,29 @@ def find_path_astar_graph(
             # --- Cost Calculation ---
             move_cost = edge.length
 
-            # --- Direction Inertia Penalty ---
+            # --- Penalties ---
             direction_penalty = 0
-            if incoming_edge_repr:
-                # Find the incoming edge object from its representation
-                incoming_edge = next((e for e in graph.edges if repr(e) == incoming_edge_repr), None)
-                if incoming_edge:
-                    # Determine the direction of travel for each edge relative to the current node
-                    incoming_vector = np.array(incoming_edge.vector)
-                    if incoming_edge.node2.id != current_id:
-                        incoming_vector *= -1
+            cross_vessel_penalty = 0
 
-                    outgoing_vector = np.array(edge.vector)
-                    if edge.node1.id != current_id:
-                        outgoing_vector *= -1
+            if incoming_edge:
+                # 1. Direction Inertia Penalty
+                incoming_vector = np.array(incoming_edge.vector) * (-1 if incoming_edge.node2.id != current_id else 1)
+                outgoing_vector = np.array(edge.vector) * (-1 if edge.node1.id != current_id else 1)
+                dot_product = np.dot(incoming_vector, outgoing_vector)
+                cosine_similarity = min(1.0, max(-1.0, dot_product))
+                direction_penalty = params.get("DIRECTION_INERTIA_WEIGHT", 100.0) * (1.0 - cosine_similarity)
 
-                    # Calculate cosine similarity
-                    dot_product = np.dot(incoming_vector, outgoing_vector)
-                    cosine_similarity = min(1.0, max(-1.0, dot_product))
+                # 2. Cross Vessel Penalty
+                if hasattr(incoming_edge, 'vessel_id') and hasattr(edge, 'vessel_id'):
+                    if incoming_edge.vessel_id != edge.vessel_id:
+                        cross_vessel_penalty = params.get("CROSS_VESSEL_PENALTY", 1e6)
 
-                    # Penalty is high for sharp turns (low similarity)
-                    direction_penalty = params.get("DIRECTION_INERTIA_WEIGHT", 100.0) * (1.0 - cosine_similarity)
 
-            new_g_cost = g_costs.get(current_id, float('inf')) + move_cost + direction_penalty
+            new_g_cost = g_costs.get(current_id, float('inf')) + move_cost + direction_penalty + cross_vessel_penalty
 
             if neighbor_node.id not in g_costs or new_g_cost < g_costs[neighbor_node.id]:
                 g_costs[neighbor_node.id] = new_g_cost
-
-                # Heuristic: Euclidean distance to the end node
-                h_cost = np.linalg.norm(np.array([neighbor_node.y, neighbor_node.x]) - np.array([end_node.y, end_node.x]))
+                h_cost = np.linalg.norm(np.array((neighbor_node.y, neighbor_node.x)) - np.array((end_node.y, end_node.x)))
                 f_cost = new_g_cost + h_cost
 
                 heapq.heappush(open_set, (f_cost, neighbor_node.id, repr(edge)))
@@ -204,9 +210,13 @@ def find_path_astar_graph(
     return None # No path found
 
 
-def _reconstruct_graph_path(graph: Graph, came_from: dict, current_id: str) -> List[Tuple[int, int]]:
+def _reconstruct_graph_path(graph: Graph, came_from: dict, current_id: str, width_map: np.ndarray, identity_map: np.ndarray) -> List[Tuple[int, int]]:
     """Reconstructs the path from the came_from dictionary, returning a list of pixels."""
     total_path = []
+
+    # Add the pixels of the final node
+    current_node = graph.nodes[current_id]
+    total_path.append((current_node.y, current_node.x))
 
     while current_id in came_from:
         prev_id, edge_repr = came_from[current_id]
@@ -214,35 +224,14 @@ def _reconstruct_graph_path(graph: Graph, came_from: dict, current_id: str) -> L
         edge = next((e for e in graph.edges if repr(e) == edge_repr), None)
 
         if edge:
-            # If the previous node was node1, the traversal was node1 -> node2.
-            # The pixels are stored in order, so we add them directly.
-            if edge.node1.id == prev_id:
-                total_path.extend(edge.pixels)
-            # Otherwise, the traversal was node2 -> node1.
-            # We need to reverse the pixel list before adding.
-            else:
-                total_path.extend(reversed(edge.pixels))
+            edge_pixels = list(edge.pixels)
+            # If the path is from node2 to node1, reverse the pixels
+            if edge.node2.id == current_id:
+                edge_pixels.reverse()
+
+            # Prepend the pixels to the total path
+            total_path = edge_pixels + total_path
 
         current_id = prev_id
 
-    return total_path[::-1] # Reverse the entire path to get start -> end order
-
-
-def _find_nearest_node(point: Tuple[int, int], graph: Graph) -> Optional[Node]:
-    """Finds the nearest node in the graph to a given (y, x) point."""
-    if not graph.nodes:
-        return None
-
-    nodes = list(graph.nodes.values())
-    node_coords = np.array([(node.y, node.x) for node in nodes])
-    point_coord = np.array(point)
-
-    distances = np.linalg.norm(node_coords - point_coord, axis=1)
-    nearest_node_idx = np.argmin(distances)
-
-    # Optional: Add a distance threshold
-    # max_dist = 30 # pixels
-    # if distances[nearest_node_idx] > max_dist:
-    #     return None
-
-    return nodes[nearest_node_idx]
+    return total_path

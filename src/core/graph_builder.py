@@ -63,6 +63,20 @@ class Graph:
         self.adjacency[edge.node1.id].append(edge)
         self.adjacency[edge.node2.id].append(edge)
 
+    def find_closest_node(self, point: Tuple[int, int]) -> Node:
+        """Finds the nearest node in the graph to a given (y, x) point."""
+        if not self.nodes:
+            return None
+
+        nodes = list(self.nodes.values())
+        node_coords = np.array([(node.y, node.x) for node in nodes])
+        point_coord = np.array(point)
+
+        distances = np.linalg.norm(node_coords - point_coord, axis=1)
+        nearest_node_idx = np.argmin(distances)
+
+        return nodes[nearest_node_idx]
+
 def build_graph_from_skeleton(skeleton: np.ndarray) -> Graph:
     """
     Builds a graph representation from a skeletonized vessel image.
