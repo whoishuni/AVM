@@ -5,16 +5,24 @@ from typing import Optional, List, Tuple, Callable, Dict, Any
 import cv2
 
 def create_guidance_map(shape: Tuple[int, int], annotations: Dict[str, Any], obstacle_cost: float) -> Optional[np.ndarray]:
-    if not annotations or "frames" not in annotations:
+    if not annotations or "polygons" not in annotations:
         return None
 
     guidance_map = np.full(shape, obstacle_cost, dtype=np.float32)
 
-    for frame_idx_str, frame_annotations in annotations["frames"].items():
-        for annotation in frame_annotations:
-            if annotation["name"] == "vessel":
-                polygon = np.array(annotation["polygon"], dtype=np.int32)
-                cv2.fillPoly(guidance_map, [polygon], 0) # Low cost inside the polygon
+    for frame_idx_str, polygons in annotations["polygons"].items():
+        for poly in polygons:
+            polygon = np.array(poly, dtype=np.int32)
+            cv2.fillPoly(guidance_map, [polygon], 0)
+
+    if "paths" in annotations and annotations["paths"]:
+        for i in range(0, len(annotations["paths"]), 2):
+            start_info = annotations["paths"][i]
+            end_info = annotations["paths"][i+1]
+            # This is a simplified reward. A more complex implementation could
+            # draw a line or use a distance transform.
+            cv2.circle(guidance_map, (start_info["point"][0], start_info["point"][1]), 10, -100, -1)
+            cv2.circle(guidance_map, (end_info["point"][0], end_info["point"][1]), 10, -100, -1)
 
     return guidance_map
 
@@ -45,7 +53,6 @@ def find_path_astar(
         width_map: Map where pixel values correspond to vessel width.
         main_vessel_width: The characteristic width of the main vessel.
         params: A dictionary of tuning parameters for the algorithm.
-        annotations: Optional dictionary of expert annotations to guide the path.
         viz_callback: An optional function to call for visualizing the search.
 
     Returns:
@@ -102,10 +109,6 @@ def find_path_astar(
                    or cost_map[neighbor] >= obstacle_cost or neighbor in closed_set:
                     continue
 
-                guidance_cost = 0
-                if guidance_map is not None:
-                    guidance_cost = guidance_map[neighbor]
-
                 # --- Calculate Penalties and Costs ---
                 cosine_similarity = 1.0
                 if parent:
@@ -143,6 +146,7 @@ def find_path_astar(
                 time_cost = (params["TIME_COST_WEIGHT"] * cost_map[neighbor]) * dynamic_cost_multiplier
 
                 # --- Total Cost Calculation ---
+                guidance_cost = guidance_map[neighbor] if guidance_map is not None else 0
                 new_g_cost = g_costs.get(current, float('inf')) + move_cost + time_cost + turn_penalty + cross_vessel_penalty + guidance_cost
 
                 if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:

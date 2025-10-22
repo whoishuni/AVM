@@ -29,7 +29,8 @@ from core.image_processing import (
 from core.pathfinding import find_path_astar
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
-    convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
+    convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon,
+    load_central_annotations, save_central_annotations
 )
 from utils.threading import ProgressUpdater
 import plotly.graph_objects as go
@@ -37,8 +38,6 @@ import subprocess
 import webbrowser
 import tempfile
 import pathlib
-import json
-import xml.etree.ElementTree as ET
 
 class YC_VesselTracerApp(QMainWindow):
     """The main application window for the YC 2D vessel tracing tool."""
@@ -62,14 +61,13 @@ class YC_VesselTracerApp(QMainWindow):
         self.params = self.DEFAULT_PARAMS.copy()
         self.setWindowTitle(self.tr("app_title"))
         self.setGeometry(100, 100, 1280, 960)
+        self.annotations = load_central_annotations()
 
         # Set window icon dynamically
         self.setWindowIcon(create_yc_icon())
 
         self.set_stylesheet()
 
-        self.image_folder_path: Optional[str] = None
-        self.annotations: Dict[str, Any] = {}
         self.images: List[np.ndarray] = []
         self.global_background_color: int = 255
         self.vessel_masks: Optional[List[np.ndarray]] = None
@@ -89,6 +87,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.smoothing_level: int = 4
         self.visible_paths: List[bool] = []
         self.animation_data: Optional[Dict[str, Any]] = None
+        self.expert_path_points: List[Dict[str, Any]] = []
 
         self.init_ui()
         self.create_actions()
@@ -139,7 +138,9 @@ class YC_VesselTracerApp(QMainWindow):
                 "param_cross_vessel_penalty_desc": "A large penalty applied when a path crosses into a different vessel, based on the identity map.",
                 "param_main_vessel_width_tolerance_desc": "Tolerance (as a percentage) for how much a side branch's width can deviate from the main vessel's width.",
                 "param_side_branch_turn_penalty_multiplier_desc": "Multiplier for the turn penalty specifically when the path is exploring a potential side branch.",
-                "engineering_mode_action": "Engineering Mode"
+                "engineering_mode_action": "Engineering Mode",
+                "info_annotating": "Engineering Mode: Drawing vessel polygons.",
+                "status_annotating": "Engineering Mode"
             },
             "zh": {
                 "app_title": "YC_血管尋路", "select_folder": "選擇圖片資料夾",
@@ -218,7 +219,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.view_menu.setTitle(self.tr("view_menu"))
         self.help_menu.setTitle(self.tr("help_menu"))
         self.tools_menu.setTitle(self.tr("tools_menu"))
-        self.engineering_mode_action.setText(self.tr("engineering_mode_action"))
 
         if self.is_packaged:
             self.packaging_action.setText(self.tr("update_action"))
@@ -308,9 +308,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.group_load = QGroupBox()
         group1_layout = QVBoxLayout(self.group_load)
         self.btn_select_folder = QPushButton()
-        self.btn_load_annotations = QPushButton("Load Annotations")
         group1_layout.addWidget(self.btn_select_folder)
-        group1_layout.addWidget(self.btn_load_annotations)
         right_controls_layout.addWidget(self.group_load)
 
         # Group 2: Configure
@@ -364,6 +362,17 @@ class YC_VesselTracerApp(QMainWindow):
 
         right_controls_layout.addStretch(1) # Add stretch to push panels to the top
 
+        # --- Engineering Mode Panel ---
+        self.group_engineering = QGroupBox("Engineering Mode")
+        engineering_layout = QVBoxLayout(self.group_engineering)
+        self.engineering_mode_toggle = QComboBox()
+        self.engineering_mode_toggle.addItems(["Draw Vessel Polygons", "Define Expert Paths"])
+        self.btn_save_annotations = QPushButton("Save Annotations")
+        engineering_layout.addWidget(self.engineering_mode_toggle)
+        engineering_layout.addWidget(self.btn_save_annotations)
+        right_controls_layout.addWidget(self.group_engineering)
+        self.group_engineering.setVisible(False) # Initially hidden
+
         self.layout.addLayout(right_controls_layout)
         self.layout.setStretchFactor(left_layout, 3) # Image layout takes 3/4 of space
         self.layout.setStretchFactor(right_controls_layout, 1) # Controls layout takes 1/4 of space
@@ -411,6 +420,7 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.tools_menu = menu_bar.addMenu("")
         self.tools_menu.addAction(self.packaging_action)
+        self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.engineering_mode_action)
 
     def connect_signals(self):
@@ -425,7 +435,6 @@ class YC_VesselTracerApp(QMainWindow):
         self.introduction_action.triggered.connect(self.show_introduction_dialog)
 
         self.btn_select_folder.clicked.connect(self.select_folder)
-        self.btn_load_annotations.clicked.connect(self.load_annotations)
         self.btn_main_action.clicked.connect(self.handle_main_action)
         self.btn_reset.clicked.connect(self.reset_system)
         self.btn_add_noise_roi.clicked.connect(self.add_noise_roi_mode)
@@ -438,9 +447,11 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_reset_view.clicked.connect(self.image_label.reset_zoom)
         self.frame_slider.valueChanged.connect(self.slider_value_changed)
         self.image_label.point_clicked.connect(self.handle_point_selection)
+        self.image_label.expert_path_point_clicked.connect(self.handle_expert_path_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
         self.packaging_action.triggered.connect(self.handle_packaging_action)
         self.engineering_mode_action.triggered.connect(self.enter_engineering_mode)
+        self.btn_save_annotations.clicked.connect(self.save_annotations)
 
     def update_ui_for_state(self):
         is_interactive = self.app_state != AppState.PROCESSING
@@ -451,9 +462,15 @@ class YC_VesselTracerApp(QMainWindow):
             AppState.MARKING_PATH: {"main_action_key": "confirm_points", "main_action_enabled": len(self.path_points_info) >= 2, "info_key": "info_marking", "status_key": "status_marking", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False},
             AppState.RANGE_CONFIRMED: {"main_action_key": "run_analysis", "main_action_enabled": True, "info_key": "info_confirmed", "status_key": "status_confirmed", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False},
             AppState.PROCESSING: {"main_action_key": "processing", "main_action_enabled": False, "info_key": "info_processing", "status_key": "status_processing", "tools_visible": False, "slider_enabled": False, "select_folder_enabled": False},
-            AppState.DONE: {"main_action_key": "analysis_complete", "main_action_enabled": False, "info_key": "info_done", "status_key": "status_done", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False}
+            AppState.DONE: {"main_action_key": "analysis_complete", "main_action_enabled": False, "info_key": "info_done", "status_key": "status_done", "tools_visible": True, "slider_enabled": False, "select_folder_enabled": False},
+            AppState.ANNOTATING_POLYGON: {"main_action_key": "run_analysis", "main_action_enabled": True, "info_key": "info_annotating", "status_key": "status_annotating", "tools_visible": False, "slider_enabled": True, "select_folder_enabled": False}
         }
         config = state_configs.get(self.app_state, state_configs[AppState.IDLE])
+
+        # Show/hide engineering panel based on state
+        is_engineering_mode = self.app_state == AppState.ANNOTATING_POLYGON
+        self.group_engineering.setVisible(is_engineering_mode)
+
         self.btn_main_action.setText(self.tr(config["main_action_key"]))
         self.btn_main_action.setEnabled(config["main_action_enabled"] and is_interactive)
 
@@ -499,7 +516,6 @@ class YC_VesselTracerApp(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, self.tr("select_folder"))
         if path:
             self.reset_system()
-            self.image_folder_path = path
             self.images = load_images_from_folder(path)
             if not self.images:
                 QMessageBox.warning(self, "Error", "Could not load any images from the selected folder.")
@@ -512,7 +528,6 @@ class YC_VesselTracerApp(QMainWindow):
             self.update_frame_display(0)
             self.app_state = AppState.LOADED
             self.update_ui_for_state()
-            self.btn_load_annotations.setEnabled(True)
 
     def slider_value_changed(self, value: int):
         self.update_frame_display(value)
@@ -542,6 +557,17 @@ class YC_VesselTracerApp(QMainWindow):
             cv2.circle(display_img_bgr, (pt.x(), pt.y()), radius, color, thickness)
         for r in self.noise_rois:
             cv2.rectangle(display_img_bgr, (r.x(), r.y()), (r.x() + r.width(), r.y() + r.height()), (0, 0, 255), 2)
+
+        if self.app_state == AppState.ANNOTATING_POLYGON and self.engineering_mode_toggle.currentText() == "Define Expert Paths":
+            for i, p_info in enumerate(self.expert_path_points):
+                pt = QPoint(p_info["point"][0], p_info["point"][1])
+                radius = 6
+                color = (0, 255, 0) if i % 2 == 0 else (255, 0, 255)
+                is_on_current_frame = p_info["frame"] == frame_index
+                thickness = -1 if is_on_current_frame else 2
+                cv2.circle(display_img_bgr, (pt.x(), pt.y()), radius + 1, (0, 0, 0), -1)
+                cv2.circle(display_img_bgr, (pt.x(), pt.y()), radius, color, thickness)
+
         return display_img_bgr
 
     def handle_main_action(self):
@@ -710,11 +736,14 @@ class YC_VesselTracerApp(QMainWindow):
 
         cumulative_cost_map = self.temporal_cost_map.copy()
         all_found_paths = []
+        folder_name = os.path.basename(self.image_folder_path) if self.image_folder_path else ""
+        current_annotations = self.annotations.get(folder_name, {})
+
         for _ in range(3):
             full_path = []
             is_path_complete = True
             for i in range(len(mask_pixels) - 1):
-                segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params, self.annotations)
+                segment = find_path_astar(cumulative_cost_map, mask_pixels[i], mask_pixels[i+1], combined_identity_map, width_map, main_vessel_width, self.params, current_annotations)
                 if segment:
                     full_path.extend(segment if i == 0 else segment[1:])
                 else:
@@ -1076,103 +1105,55 @@ class YC_VesselTracerApp(QMainWindow):
             QMessageBox.critical(self, "更新錯誤", f"檢查更新時發生未知錯誤：\n{e}")
 
     def closeEvent(self, event):
+        # Ask to save annotations if they have been modified
+        # This is a placeholder for a more robust check
+        if self.group_engineering.isVisible():
+             reply = QMessageBox.question(self, 'Save Annotations',
+                                          "Do you want to save changes to annotations?",
+                                          QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                                          QMessageBox.StandardButton.Save)
+
+             if reply == QMessageBox.StandardButton.Save:
+                 self.save_annotations()
+             elif reply == QMessageBox.StandardButton.Cancel:
+                 event.ignore()
+                 return
+
         self.reset_system()
         event.accept()
 
     def enter_engineering_mode(self):
         password, ok = QInputDialog.getText(self, "Engineering Mode", "Enter Password:", QLineEdit.EchoMode.Password)
-        if ok:
-            if password == "nick910114":
-                QMessageBox.information(self, "Access Granted", "Engineering Mode activated.")
-                self.launch_labelimg()
-            else:
-                QMessageBox.warning(self, "Access Denied", "Incorrect password.")
-                self.engineering_mode_action.setEnabled(False)
+        if ok and password == "nick910114":
+            self.app_state = AppState.ANNOTATING_POLYGON
+            self.update_ui_for_state()
+            self.image_label.set_engineering_mode(True)
+        elif ok:
+            QMessageBox.warning(self, "Access Denied", "Incorrect password.")
+            self.engineering_mode_action.setEnabled(False)
 
-    def launch_labelimg(self):
-        if not self.images:
-            QMessageBox.warning(self, "No Images", "Please load an image sequence before starting Engineering Mode.")
-            return
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Prepare images with temporal stacking
-            for i in range(len(self.images)):
-                # Stack frames from 0 to i
-                stacked_image = create_maximum_intensity_projection(self.images[0:i+1])
-                if stacked_image is not None:
-                    filename = os.path.join(temp_dir, f"frame_{i:04d}.png")
-                    cv2.imwrite(filename, stacked_image)
-
-            # Path to predefined_classes.txt
-            classes_path = os.path.abspath("data/predefined_classes.txt")
-
-            # Launch labelImg
-            try:
-                command = [sys.executable, "-m", "labelImg.labelImg", temp_dir, classes_path]
-                subprocess.run(command)
-
-                # After labelImg is closed, process the annotations
-                self.process_annotations(temp_dir)
-
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to launch labelImg: {e}")
-
-    def process_annotations(self, annotation_dir: str):
-        annotations = {"frames": {}}
-        for filename in os.listdir(annotation_dir):
-            if not filename.endswith(".xml"):
-                continue
-
-            try:
-                tree = ET.parse(os.path.join(annotation_dir, filename))
-                root = tree.getroot()
-
-                image_filename = root.find("filename").text
-                frame_index_str = "".join(filter(str.isdigit, image_filename))
-                frame_index = int(frame_index_str)
-
-                frame_annotations = []
-                for obj in root.findall("object"):
-                    name = obj.find("name").text
-                    polygon = obj.find("polygon")
-                    points = []
-                    for pt in polygon.findall("pt"):
-                        x = int(pt.find("x").text)
-                        y = int(pt.find("y").text)
-                        points.append((x, y))
-                    frame_annotations.append({"name": name, "polygon": points})
-                annotations["frames"][frame_index] = frame_annotations
-            except Exception as e:
-                print(f"Error parsing {filename}: {e}")
-
-        if not annotations["frames"]:
-            QMessageBox.information(self, "No Annotations", "No new annotations were created.")
-            return
-
-        # Ask user to save the annotations
-        if self.image_folder_path:
-            default_name = os.path.basename(self.image_folder_path) + "_annotations.json"
-            save_path, _ = QFileDialog.getSaveFileName(self, "Save Annotations", os.path.join(self.image_folder_path, default_name), "JSON Files (*.json)")
-            if save_path:
-                try:
-                    with open(save_path, 'w') as f:
-                        json.dump(annotations, f, indent=4)
-                    QMessageBox.information(self, "Success", f"Annotations saved to {save_path}")
-                    self.annotations = annotations
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to save annotations: {e}")
-
-    def load_annotations(self):
+    def save_annotations(self):
         if not self.image_folder_path:
-            QMessageBox.warning(self, "Warning", "Please load an image folder first.")
+            QMessageBox.warning(self, "Error", "No image folder loaded.")
             return
 
-        load_path, _ = QFileDialog.getOpenFileName(self, "Load Annotations", self.image_folder_path, "JSON Files (*.json)")
-        if load_path:
-            try:
-                with open(load_path, 'r') as f:
-                    self.annotations = json.load(f)
-                QMessageBox.information(self, "Success", f"Annotations loaded from {load_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load annotations: {e}")
-                self.annotations = {}
+        # Get annotations from the image label
+        current_polygons = self.image_label.get_polygons()
+
+        # Structure the data
+        folder_name = os.path.basename(self.image_folder_path)
+        if folder_name not in self.annotations:
+            self.annotations[folder_name] = {"polygons": {}, "paths": []}
+
+        self.annotations[folder_name]["polygons"] = current_polygons
+
+        self.annotations[folder_name]["paths"] = self.expert_path_points
+
+        save_central_annotations(self.annotations)
+        QMessageBox.information(self, "Success", "Annotations saved to annotations.json")
+
+    def handle_expert_path_selection(self, point: QPoint):
+        self.expert_path_points.append({"point": (point.x(), point.y()), "frame": self.current_frame_index})
+        if len(self.expert_path_points) % 2 == 0:
+            QMessageBox.information(self, "Path Defined", f"Expert path {len(self.expert_path_points)//2} defined.")
+        self.update_frame_display(self.current_frame_index)

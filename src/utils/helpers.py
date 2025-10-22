@@ -5,6 +5,7 @@ import cv2
 from enum import Enum, auto
 from typing import List, Optional, Tuple
 
+import json
 # --- PyQt6 Imports ---
 from PyQt6.QtGui import QPixmap, QImage, QIcon
 from PyQt6.QtCore import QPoint
@@ -19,6 +20,7 @@ class AppState(Enum):
     RANGE_CONFIRMED = auto()  # Points confirmed, ready for analysis configuration.
     PROCESSING = auto()       # Busy with a background task.
     DONE = auto()             # Analysis complete, results are shown.
+    ANNOTATING_POLYGON = auto() # In engineering mode, drawing a polygon.
 
 class DrawingMode(Enum):
     """Defines the available drawing modes for the user."""
@@ -201,3 +203,22 @@ def create_yc_icon() -> QIcon:
     except ImportError:
         # Return an empty QIcon if Pillow is not installed
         return QIcon()
+
+def load_central_annotations(file_path: str = "annotations.json") -> dict:
+    """Loads the central annotation file."""
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading annotations: {e}")
+            return {}
+    return {}
+
+def save_central_annotations(data: dict, file_path: str = "annotations.json"):
+    """Saves data to the central annotation file."""
+    try:
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)
+    except IOError as e:
+        print(f"Error saving annotations: {e}")

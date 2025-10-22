@@ -11,6 +11,7 @@ class YC_ImageLabel(QLabel):
     """
     point_clicked = pyqtSignal(QPoint)
     roi_drawn = pyqtSignal(QRect)
+    expert_path_point_clicked = pyqtSignal(QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -23,6 +24,10 @@ class YC_ImageLabel(QLabel):
         self.pan_offset = QPoint(0, 0)
         self.is_panning = False
         self.last_pan_pos = QPoint()
+
+        self.engineering_mode = False
+        self.current_polygon_points = []
+        self.polygons = {} # Store polygons per frame index
 
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -79,7 +84,12 @@ class YC_ImageLabel(QLabel):
             if not image_coords:
                 return
 
-            if self.main_window.app_state == AppState.MARKING_PATH and self.main_window.drawing_mode == DrawingMode.MARKING:
+            if self.engineering_mode and self.main_window.app_state == AppState.ANNOTATING_POLYGON:
+                if self.main_window.engineering_mode_toggle.currentText() == "Draw Vessel Polygons":
+                    self.handle_polygon_drawing(image_coords)
+                else:
+                    self.expert_path_point_clicked.emit(image_coords)
+            elif self.main_window.app_state == AppState.MARKING_PATH and self.main_window.drawing_mode == DrawingMode.MARKING:
                 self.point_clicked.emit(image_coords)
             elif self.main_window.drawing_mode == DrawingMode.NOISE_ROI:
                 self.is_drawing_roi = True
@@ -123,6 +133,38 @@ class YC_ImageLabel(QLabel):
         else:
             super().wheelEvent(event)
 
+    def keyPressEvent(self, event):
+        if self.engineering_mode and event.key() == Qt.Key.Key_Z and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if self.current_polygon_points:
+                self.current_polygon_points.pop()
+                self.update()
+        else:
+            super().keyPressEvent(event)
+
+    def set_engineering_mode(self, enabled: bool):
+        self.engineering_mode = enabled
+        self.current_polygon_points = []
+        if not enabled:
+            self.polygons = {}
+        self.update()
+
+    def get_polygons(self):
+        return self.polygons
+
+    def handle_polygon_drawing(self, point: QPoint):
+        # If the user clicks on the first point, close the polygon
+        if self.current_polygon_points and (point - self.current_polygon_points[0]).manhattanLength() < 10:
+            if len(self.current_polygon_points) > 2:
+                frame_idx = self.main_window.current_frame_index
+                if frame_idx not in self.polygons:
+                    self.polygons[frame_idx] = []
+                self.polygons[frame_idx].append([(p.x(), p.y()) for p in self.current_polygon_points])
+                self.current_polygon_points = []
+        else:
+            self.current_polygon_points.append(point)
+
+        self.update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if not self.current_pixmap:
@@ -160,3 +202,37 @@ class YC_ImageLabel(QLabel):
                 int(self.current_drawing_roi.height() * self.zoom_factor)
             )
             painter.drawRect(display_roi.normalized())
+
+        if self.engineering_mode:
+            painter.setPen(QPen(QColor(0, 255, 0, 200), 2))
+            painter.setBrush(QBrush(QColor(0, 255, 0, 50)))
+
+            # Draw completed polygons for the current frame
+            frame_idx = self.main_window.current_frame_index
+            if frame_idx in self.polygons:
+                for poly_points in self.polygons[frame_idx]:
+                    q_poly = [QPoint(p[0], p[1]) * self.zoom_factor + target_rect.topLeft() for p in poly_points]
+                    painter.drawPolygon(q_poly)
+
+            # Draw the current polygon being created
+            if self.current_polygon_points:
+                pen = QPen(QColor(255, 255, 0, 255), 2, Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+
+                # Draw lines between points
+                if len(self.current_polygon_points) > 1:
+                    for i in range(len(self.current_polygon_points) - 1):
+                        p1 = self.current_polygon_points[i] * self.zoom_factor + target_rect.topLeft()
+                        p2 = self.current_polygon_points[i+1] * self.zoom_factor + target_rect.topLeft()
+                        painter.drawLine(p1, p2)
+
+                # Draw points
+                for p in self.current_polygon_points:
+                    center = p * self.zoom_factor + target_rect.topLeft()
+                    painter.drawEllipse(center, 4, 4)
+
+                # Draw a line to the current mouse position
+                mouse_pos = self.mapFromGlobal(self.cursor().pos())
+                if target_rect.contains(mouse_pos):
+                     last_point = self.current_polygon_points[-1] * self.zoom_factor + target_rect.topLeft()
+                     painter.drawLine(last_point, mouse_pos)
