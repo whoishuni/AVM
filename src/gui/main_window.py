@@ -21,12 +21,14 @@ from gui.step_viewer_dialog import YC_StepViewerDialog
 from gui.help_dialog import YC_HelpDialog
 from gui.parameter_dialog import YC_ParameterDialog
 from gui.markdown_dialog import YC_MarkdownDialog
+from gui.viewer_3d_dialog import YC_3DViewerDialog
 from core.image_processing import (
     create_enhanced_vessel_masks, create_maximum_intensity_projection,
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
-    create_combined_identity_map, generate_mask_steps
+    create_combined_identity_map, generate_mask_steps, segment_vessels_3d
 )
-from core.pathfinding import find_path_astar
+from core.flow_analyzer_3d import FlowAnalyzer3D
+from core.pathfinding import find_path_astar, find_path_astar_3d
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
     convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
@@ -67,6 +69,11 @@ class YC_VesselTracerApp(QMainWindow):
         self.set_stylesheet()
 
         self.images: List[np.ndarray] = []
+        self.image_volume: Optional[np.ndarray] = None # For 3D view
+        self.vessel_mask_3d: Optional[np.ndarray] = None # For 3D segmentation mask
+        self.flow_vectors_3d: Optional[Tuple[np.ndarray, np.ndarray]] = None # For 3D flow vectors
+        self.path_points_3d: List[Tuple[int, int, int]] = [] # For 3D path start/end points
+        self.path_3d: Optional[List[Tuple[int, int, int]]] = None # For the final 3D path
         self.global_background_color: int = 255
         self.vessel_masks: Optional[List[np.ndarray]] = None
         self.layered_vessel_mask: Optional[np.ndarray] = None
@@ -192,6 +199,8 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_select_folder.setText(self.tr("select_folder"))
         self.btn_add_noise_roi.setText(self.tr("draw_noise"))
         self.btn_smoothing_preview.setText(self.tr("adjust_smoothing"))
+        self.btn_segment_3d.setText("Run 3D Segmentation")
+        self.btn_analyze_flow_3d.setText("Analyze 3D Flow") # New button text
         self.btn_show_path.setText(self.tr("preview_mask"))
         self.btn_show_3d_view.setText(self.tr("show_3d_view"))
         self.btn_step_view.setText(self.tr("view_steps"))
@@ -310,16 +319,24 @@ class YC_VesselTracerApp(QMainWindow):
         group2_layout = QVBoxLayout(self.group_configure)
         self.btn_add_noise_roi = QPushButton()
         self.btn_smoothing_preview = QPushButton()
+        self.btn_segment_3d = QPushButton()
+        self.btn_analyze_flow_3d = QPushButton() # New button for flow analysis
         group2_layout.addWidget(self.btn_add_noise_roi)
         group2_layout.addWidget(self.btn_smoothing_preview)
+        group2_layout.addWidget(self.btn_segment_3d)
+        group2_layout.addWidget(self.btn_analyze_flow_3d) # Add button to layout
         right_controls_layout.addWidget(self.group_configure)
         self.group_tools = self.group_configure
 
         # Group 3: Execute
         self.group_execute = QGroupBox()
         group3_layout = QVBoxLayout(self.group_execute)
-        self.btn_main_action = QPushButton()
+        self.btn_main_action = QPushButton() # This is the main 2D analysis button
+        self.btn_find_path_3d = QPushButton("Find 3D Path") # New button for 3D pathfinding
+        self.info_label_3d = QLabel("Pick 3D path points in the viewer.") # Info label for 3D path
         group3_layout.addWidget(self.btn_main_action)
+        group3_layout.addWidget(self.btn_find_path_3d)
+        group3_layout.addWidget(self.info_label_3d)
         right_controls_layout.addWidget(self.group_execute)
 
         # Group 4: View & Reset
@@ -419,6 +436,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.btn_reset.clicked.connect(self.reset_system)
         self.btn_add_noise_roi.clicked.connect(self.add_noise_roi_mode)
         self.btn_smoothing_preview.clicked.connect(self.open_smoothing_preview)
+        self.btn_segment_3d.clicked.connect(self.run_3d_segmentation)
+        self.btn_analyze_flow_3d.clicked.connect(self.analyze_3d_flow)
+        self.btn_find_path_3d.clicked.connect(self.find_3d_path) # Connect new button
         self.btn_show_path.clicked.connect(self.show_segmented_path_preview)
         self.btn_show_3d_view.clicked.connect(self.show_3d_view)
         self.btn_step_view.clicked.connect(self.show_step_viewer)
@@ -451,7 +471,8 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.statusBar().showMessage(self.tr(config.get("status_key", "Ready")))
         self.group_tools.setVisible(config["tools_visible"])
-        self.btn_show_3d_view.setEnabled(self.app_state == AppState.DONE and is_interactive)
+        # Enable 3D view button as soon as images are loaded
+        self.btn_show_3d_view.setEnabled(self.image_volume is not None and is_interactive)
         self.btn_replay_animation.setEnabled(self.app_state == AppState.DONE and is_interactive)
         self.path_replay_selector.setEnabled(self.app_state == AppState.DONE and is_interactive)
         self.frame_slider.setEnabled(config["slider_enabled"])
@@ -492,6 +513,15 @@ class YC_VesselTracerApp(QMainWindow):
                 QMessageBox.warning(self, "Error", "Could not load any images from the selected folder.")
                 self.reset_system()
                 return
+
+            # Stack images into a 3D volume
+            try:
+                self.image_volume = np.stack(self.images, axis=-1)
+            except ValueError:
+                 QMessageBox.warning(self, "Error", "Images in the folder have inconsistent dimensions and could not be stacked into a 3D volume.")
+                 self.reset_system()
+                 return
+
             self.global_background_color = get_most_frequent_color(self.images[0])
             self.current_frame_index = 0
             self.frame_slider.setRange(0, len(self.images) - 1)
@@ -810,54 +840,109 @@ class YC_VesselTracerApp(QMainWindow):
         return image
 
     def show_3d_view(self):
-        if self.app_state != AppState.DONE:
-            QMessageBox.warning(self, "Not Ready", "Please run a full analysis first.")
+        if self.image_volume is None:
+            QMessageBox.warning(self, "Not Ready", "No 3D data is available. Please load an image sequence first.")
             return
-        self.statusBar().showMessage(self.tr("info_processing"))
+
+        # Launch the 3D viewer dialog with all available 3D data
+        dialog = YC_3DViewerDialog(
+            self.image_volume,
+            mask_volume=self.vessel_mask_3d,
+            flow_data=self.flow_vectors_3d,
+            path_data=self.path_3d,
+            parent=self
+        )
+        dialog.point_picked.connect(self.handle_3d_point_picked)
+        dialog.exec()
+
+    def run_3d_segmentation(self):
+        if self.image_volume is None:
+            QMessageBox.warning(self, "Error", "Please load images first.")
+            return
+
+        self.statusBar().showMessage("Running 3D segmentation...")
         QApplication.processEvents()
 
-        plot_traces = self.generate_3d_plot_data()
-        if not plot_traces:
-            QMessageBox.warning(self, "Error", "Could not generate data for the 3D plot.")
-            self.statusBar().showMessage("Error generating 3D plot.", 5000)
+        mask = segment_vessels_3d(self.image_volume)
+
+        if mask is not None and np.any(mask):
+            self.vessel_mask_3d = mask
+            self.statusBar().showMessage("3D segmentation complete.", 5000)
+            QMessageBox.information(self, "Success", "3D segmentation is complete. You can now analyze the 3D flow.")
+        else:
+            self.vessel_mask_3d = None
+            self.statusBar().showMessage("3D segmentation failed.", 5000)
+            QMessageBox.warning(self, "Failed", "3D segmentation did not produce a valid result.")
+        self.update_ui_for_state()
+
+    def analyze_3d_flow(self):
+        if self.vessel_mask_3d is None:
+            QMessageBox.warning(self, "Error", "Please run 3D segmentation first.")
             return
 
-        fig = go.Figure(data=plot_traces)
-        fig.update_layout(
-            title_text='YC 3D Vessel Path',
-            scene=dict(
-                xaxis_title='X',
-                yaxis_title='Y',
-                zaxis_title='Frame (Time)',
-                aspectratio=dict(x=1, y=1, z=0.5)
-            ),
-            margin=dict(l=0, r=0, b=0, t=40)
+        self.statusBar().showMessage("Analyzing 3D flow...")
+        QApplication.processEvents()
+
+        analyzer = FlowAnalyzer3D(self.vessel_mask_3d)
+        flow_data = analyzer.analyze_flow()
+
+        if flow_data:
+            self.flow_vectors_3d = flow_data
+            self.statusBar().showMessage("3D flow analysis complete.", 5000)
+            QMessageBox.information(self, "Success", "3D flow analysis is complete. Use 'Show 3D View' to see the flow vectors.")
+        else:
+            self.flow_vectors_3d = None
+            self.statusBar().showMessage("3D flow analysis failed.", 5000)
+            QMessageBox.warning(self, "Failed", "Could not determine flow from the 3D mask.")
+        self.update_ui_for_state()
+
+    def handle_3d_point_picked(self, point_zyx: Tuple[int, int, int]):
+        if len(self.path_points_3d) >= 2:
+            self.path_points_3d.clear() # Reset if we already have a path
+            self.path_3d = None
+
+        self.path_points_3d.append(point_zyx)
+        self.info_label_3d.setText(f"Picked {len(self.path_points_3d)}/2 points.")
+        self.statusBar().showMessage(f"Picked point: {point_zyx}", 3000)
+
+    def find_3d_path(self):
+        if len(self.path_points_3d) < 2:
+            QMessageBox.warning(self, "Error", "Please pick a start and an end point in the 3D viewer first.")
+            return
+
+        if self.vessel_mask_3d is None:
+            QMessageBox.warning(self, "Error", "A 3D vessel mask is required for pathfinding.")
+            return
+
+        start_node = self.path_points_3d[0]
+        end_node = self.path_points_3d[1]
+
+        self.statusBar().showMessage("Finding 3D path...")
+        QApplication.processEvents()
+
+        flow_pts, flow_vecs = None, None
+        if self.flow_vectors_3d:
+            flow_pts, flow_vecs = self.flow_vectors_3d
+            # Swap columns from (x, y, z) and (vx, vy, vz) to (z, y, x) and (vz, vy, vx) for pathfinding
+            flow_pts = flow_pts[:, ::-1]
+            flow_vecs = flow_vecs[:, ::-1]
+
+        path = find_path_astar_3d(
+            self.vessel_mask_3d,
+            start_node,
+            end_node,
+            flow_vectors=flow_vecs,
+            flow_points=flow_pts
         )
-        fig.update_scenes(yaxis_autorange="reversed")
 
-        # Generate self-contained HTML
-        html_content = fig.to_html(full_html=True, include_plotlyjs=True)
-        file_url = ""
-        try:
-            # Save to a temporary file
-            with tempfile.NamedTemporaryFile('w', delete=False, suffix='.html', encoding='utf-8') as f:
-                f.write(html_content)
-                # Get the file path as a URL
-                file_url = pathlib.Path(f.name).as_uri()
-
-            # Try to open in the default web browser
-            opened = webbrowser.open(file_url)
-            if not opened:
-                raise webbrowser.Error("Browser could not be opened.")
-            self.statusBar().showMessage("3D view opened in browser.", 5000)
-
-        except Exception as e:
-            # If it fails, show a message with the path
-            error_msg = f"無法自動開啟瀏覽器。\n\n請手動開啟此檔案路徑:\n{file_url}\n\n錯誤: {e}"
-            QMessageBox.information(self,
-                                    self.tr("show_3d_view"),
-                                    error_msg)
-            self.statusBar().showMessage("無法自動開啟瀏覽器", 5000)
+        if path:
+            self.path_3d = path
+            self.statusBar().showMessage("3D path found successfully.", 5000)
+            QMessageBox.information(self, "Success", "3D path found. Open the 3D viewer to see the result.")
+        else:
+            self.path_3d = None
+            self.statusBar().showMessage("Failed to find a 3D path.", 5000)
+            QMessageBox.warning(self, "Failed", "Could not find a path between the selected points.")
 
     def generate_3d_plot_data(self):
         if not self.vessel_masks: return []
@@ -886,6 +971,11 @@ class YC_VesselTracerApp(QMainWindow):
 
     def reset_system(self):
         self.images = []
+        self.image_volume = None
+        self.vessel_mask_3d = None
+        self.flow_vectors_3d = None
+        self.path_points_3d = []
+        self.path_3d = None
         self.global_background_color = 255
         self.vessel_masks = None
         self.layered_vessel_mask = None

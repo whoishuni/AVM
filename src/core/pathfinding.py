@@ -129,3 +129,100 @@ def find_path_astar(
                     came_from[neighbor] = current
 
     return None  # No path found
+
+def find_path_astar_3d(
+    mask_volume: np.ndarray,
+    start_node: Tuple[int, int, int],
+    end_node: Tuple[int, int, int],
+    flow_vectors: Optional[np.ndarray] = None,
+    flow_points: Optional[np.ndarray] = None,
+    flow_weight: float = 10.0
+) -> Optional[List[Tuple[int, int, int]]]:
+    """
+    Finds a path in a 3D volume using the A* algorithm, guided by a flow field.
+
+    Args:
+        mask_volume: A 3D numpy array where non-zero values are traversable.
+        start_node: The (z, y, x) starting coordinate.
+        end_node: The (z, y, x) ending coordinate.
+        flow_vectors: An (N, 3) array of flow vectors (vz, vy, vx).
+        flow_points: An (N, 3) array of coordinates (z, y, x) for the flow vectors.
+        flow_weight: A multiplier for the cost/reward of following the flow.
+
+    Returns:
+        A list of (z, y, x) tuples representing the path, or None if no path is found.
+    """
+    if mask_volume[start_node] == 0 or mask_volume[end_node] == 0:
+        return None
+
+    # Helper to find the nearest flow vector for a given point
+    flow_kdtree = None
+    if flow_points is not None:
+        from scipy.spatial import cKDTree
+        flow_kdtree = cKDTree(flow_points)
+
+    def get_flow_vector_at(point: Tuple[int, int, int]) -> np.ndarray:
+        if flow_kdtree is None:
+            return np.array([1, 0, 0]) # Default flow: forward in time
+        dist, idx = flow_kdtree.query(point)
+        if idx < len(flow_vectors):
+            return flow_vectors[idx]
+        return np.array([1, 0, 0])
+
+    def heuristic(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
+        return np.linalg.norm(np.array(a) - np.array(b))
+
+    open_set = [(0, start_node)]  # (f_cost, node)
+    came_from = {}
+    g_costs = {start_node: 0}
+
+    while open_set:
+        _, current = heapq.heappop(open_set)
+
+        if current == end_node:
+            path = []
+            while current in came_from:
+                path.append(current)
+                current = came_from[current]
+            path.append(start_node)
+            return path[::-1]
+
+        # Explore 26 neighbors in 3D
+        for dz in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dz == 0 and dy == 0 and dx == 0:
+                        continue
+
+                    neighbor = (current[0] + dz, current[1] + dy, current[2] + dx)
+
+                    # Check boundaries and if the neighbor is in a vessel
+                    if not (0 <= neighbor[0] < mask_volume.shape[0] and
+                            0 <= neighbor[1] < mask_volume.shape[1] and
+                            0 <= neighbor[2] < mask_volume.shape[2] and
+                            mask_volume[neighbor] > 0):
+                        continue
+
+                    move_vector = np.array([dz, dy, dx])
+                    move_dist = np.linalg.norm(move_vector)
+
+                    # Cost for moving against the flow
+                    flow_cost = 0
+                    if flow_vectors is not None:
+                        flow_vec = get_flow_vector_at(current)
+                        # Normalize move vector
+                        move_vector_norm = move_vector / move_dist
+                        # Cosine similarity: 1 if aligned, -1 if opposite
+                        cosine_sim = np.dot(move_vector_norm, flow_vec)
+                        # Cost is high when moving against the flow (cosine_sim is negative)
+                        flow_cost = flow_weight * (1 - cosine_sim)
+
+                    new_g_cost = g_costs.get(current, float('inf')) + move_dist + flow_cost
+
+                    if neighbor not in g_costs or new_g_cost < g_costs[neighbor]:
+                        g_costs[neighbor] = new_g_cost
+                        f_cost = new_g_cost + heuristic(neighbor, end_node)
+                        heapq.heappush(open_set, (f_cost, neighbor))
+                        came_from[neighbor] = current
+
+    return None # No path found
