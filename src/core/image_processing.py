@@ -297,7 +297,7 @@ def segment_vessels_3d(image_volume: np.ndarray, smoothing_sigma: float = 1.5) -
     # Apply Gaussian blur to the 3D volume
     # Note: cv2.GaussianBlur doesn't directly support 3D, so we apply it slice by slice.
     # A more 3D-native library like scipy.ndimage would be better for true 3D smoothing.
-    from scipy.ndimage import gaussian_filter
+    from scipy.ndimage import gaussian_filter, binary_opening
 
     # Normalize to 0-255 and convert to uint8 for Otsu's method
     volume_normalized = cv2.normalize(image_volume, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
@@ -305,16 +305,18 @@ def segment_vessels_3d(image_volume: np.ndarray, smoothing_sigma: float = 1.5) -
     # Apply 3D Gaussian blur
     blurred_volume = gaussian_filter(volume_normalized, sigma=smoothing_sigma)
 
-    # Apply Otsu's thresholding
-    threshold_value, binary_mask = cv2.threshold(
-        blurred_volume, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    # Calculate a global Otsu threshold by flattening the 3D volume into a 1D array
+    # This is the correct way to apply Otsu to a 3D dataset with OpenCV
+    threshold_value, _ = cv2.threshold(
+        blurred_volume.flatten(), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # Optional: Apply morphological opening to remove small noise
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    # Apply slice by slice
-    cleaned_mask = np.zeros_like(binary_mask)
-    for i in range(binary_mask.shape[2]):
-        cleaned_mask[:, :, i] = cv2.morphologyEx(binary_mask[:, :, i], cv2.MORPH_OPEN, kernel)
+    # Apply the calculated global threshold to the 3D volume
+    binary_mask = (blurred_volume > threshold_value).astype(np.uint8)
 
-    return cleaned_mask.astype(np.uint8)
+    # Optional: Apply a true 3D morphological opening to remove small noise
+    # This is more effective than slice-by-slice processing
+    structure = np.ones((3, 3, 3), dtype=bool) # 3x3x3 connectivity
+    cleaned_mask = binary_opening(binary_mask, structure=structure).astype(np.uint8) * 255
+
+    return cleaned_mask
