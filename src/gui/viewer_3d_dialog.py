@@ -21,10 +21,11 @@ class VolumeRenderThread(QThread):
     def run(self):
         # --- Render Base Volume ---
         self.progress.emit(10)
-        grid = pv.UniformGrid()
-        grid.dimensions = np.array(self.data.shape[::-1])
-        grid.origin = (0, 0, 0)
-        grid.spacing = (1, 1, 1)
+        grid = pv.ImageData(
+            dimensions=self.data.shape[::-1],
+            origin=(0, 0, 0),
+            spacing=(1, 1, 1)
+        )
         grid.point_data["values"] = self.data.flatten(order="F")
         self.progress.emit(25)
 
@@ -33,10 +34,11 @@ class VolumeRenderThread(QThread):
 
         # --- Render Mask as a Mesh Overlay ---
         if self.mask_volume is not None and np.any(self.mask_volume):
-            mask_grid = pv.UniformGrid()
-            mask_grid.dimensions = np.array(self.mask_volume.shape[::-1])
-            mask_grid.origin = (0, 0, 0)
-            mask_grid.spacing = (1, 1, 1)
+            mask_grid = pv.ImageData(
+                dimensions=self.mask_volume.shape[::-1],
+                origin=(0, 0, 0),
+                spacing=(1, 1, 1)
+            )
             mask_grid.point_data["mask"] = self.mask_volume.flatten(order="F")
 
             contours = mask_grid.contour([1], scalars="mask")
