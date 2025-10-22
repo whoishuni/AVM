@@ -22,11 +22,12 @@ from gui.help_dialog import YC_HelpDialog
 from gui.parameter_dialog import YC_ParameterDialog
 from gui.markdown_dialog import YC_MarkdownDialog
 from core.image_processing import (
-    create_enhanced_vessel_masks, create_maximum_intensity_projection,
+    create_enhanced_vessel_masks,
     create_temporal_cost_map, build_vessel_identity_map, create_vessel_layers,
     create_combined_identity_map, generate_mask_steps
 )
 from core.pathfinding import find_path_astar
+from core.flow_analyzer_3d import find_path_in_3d_volume
 from utils.helpers import (
     load_images_from_folder, get_most_frequent_color, find_closest_pixel_on_mask,
     convert_np_to_pixmap, AppState, DrawingMode, create_yc_icon
@@ -66,9 +67,10 @@ class YC_VesselTracerApp(QMainWindow):
 
         self.set_stylesheet()
 
-        self.images: List[np.ndarray] = []
+        self.image_volume: Optional[np.ndarray] = None
         self.global_background_color: int = 255
         self.vessel_masks: Optional[List[np.ndarray]] = None
+        self.vessel_mask_volume: Optional[np.ndarray] = None
         self.layered_vessel_mask: Optional[np.ndarray] = None
         self.vessel_identity_map: Optional[np.ndarray] = None
         self.noise_rois: List[QRect] = []
@@ -319,7 +321,9 @@ class YC_VesselTracerApp(QMainWindow):
         self.group_execute = QGroupBox()
         group3_layout = QVBoxLayout(self.group_execute)
         self.btn_main_action = QPushButton()
+        self.btn_run_3d_segmentation = QPushButton("Execute 3D Segmentation")
         group3_layout.addWidget(self.btn_main_action)
+        group3_layout.addWidget(self.btn_run_3d_segmentation)
         right_controls_layout.addWidget(self.group_execute)
 
         # Group 4: View & Reset
@@ -429,6 +433,7 @@ class YC_VesselTracerApp(QMainWindow):
         self.image_label.point_clicked.connect(self.handle_point_selection)
         self.image_label.roi_drawn.connect(self.handle_roi_drawn)
         self.packaging_action.triggered.connect(self.handle_packaging_action)
+        self.btn_run_3d_segmentation.clicked.connect(self.run_3d_segmentation)
 
     def update_ui_for_state(self):
         is_interactive = self.app_state != AppState.PROCESSING
@@ -444,6 +449,7 @@ class YC_VesselTracerApp(QMainWindow):
         config = state_configs.get(self.app_state, state_configs[AppState.IDLE])
         self.btn_main_action.setText(self.tr(config["main_action_key"]))
         self.btn_main_action.setEnabled(config["main_action_enabled"] and is_interactive)
+        self.btn_run_3d_segmentation.setVisible(self.app_state == AppState.RANGE_CONFIRMED)
 
         # Dynamic info text formatting
         info_text = self.tr(config["info_key"], len(self.path_points_info), self.smoothing_level)
@@ -460,22 +466,22 @@ class YC_VesselTracerApp(QMainWindow):
         self.open_action.setEnabled(config["select_folder_enabled"] and is_interactive)
         self.reset_action.setEnabled(is_interactive)
         self.settings_action.setEnabled(is_interactive)
-        self.zoom_in_action.setEnabled(bool(self.images))
-        self.zoom_out_action.setEnabled(bool(self.images))
-        self.reset_zoom_action.setEnabled(bool(self.images))
-        self.btn_pan_mode.setEnabled(bool(self.images) and is_interactive)
-        self.btn_reset_view.setEnabled(bool(self.images) and is_interactive)
+        self.zoom_in_action.setEnabled(self.image_volume is not None)
+        self.zoom_out_action.setEnabled(self.image_volume is not None)
+        self.reset_zoom_action.setEnabled(self.image_volume is not None)
+        self.btn_pan_mode.setEnabled(self.image_volume is not None and is_interactive)
+        self.btn_reset_view.setEnabled(self.image_volume is not None and is_interactive)
         if self.drawing_mode == DrawingMode.NOISE_ROI and self.app_state == AppState.RANGE_CONFIRMED:
             self.info_label.setText(self.tr("info_drawing_noise"))
 
     def keyPressEvent(self, event):
-        if not self.images or self.app_state not in [AppState.LOADED, AppState.MARKING_PATH]:
+        if self.image_volume is None or self.app_state not in [AppState.LOADED, AppState.MARKING_PATH]:
             super().keyPressEvent(event)
             return
         current_idx = self.current_frame_index
         new_idx = -1
         if event.key() == Qt.Key.Key_D:
-            new_idx = min(len(self.images) - 1, current_idx + 1)
+            new_idx = min(self.image_volume.shape[2] - 1, current_idx + 1)
         elif event.key() == Qt.Key.Key_A:
             new_idx = max(0, current_idx - 1)
         if new_idx != -1 and new_idx != current_idx:
@@ -484,17 +490,26 @@ class YC_VesselTracerApp(QMainWindow):
             super().keyPressEvent(event)
 
     def select_folder(self):
-        path = QFileDialog.getExistingDirectory(self, self.tr("select_folder"))
+        path = QFileDialog.getExistingDirectory(self, self, self.tr("select_folder"))
         if path:
             self.reset_system()
-            self.images = load_images_from_folder(path)
-            if not self.images:
+            images_list = load_images_from_folder(path)
+            if not images_list:
                 QMessageBox.warning(self, "Error", "Could not load any images from the selected folder.")
                 self.reset_system()
                 return
-            self.global_background_color = get_most_frequent_color(self.images[0])
+
+            # Stack the images into a 3D volume (H, W, T)
+            try:
+                self.image_volume = np.stack(images_list, axis=-1)
+            except ValueError as e:
+                QMessageBox.critical(self, "Error", f"Could not create 3D volume. Ensure all images have the same dimensions.\n\n{e}")
+                self.reset_system()
+                return
+
+            self.global_background_color = get_most_frequent_color(self.image_volume[:, :, 0])
             self.current_frame_index = 0
-            self.frame_slider.setRange(0, len(self.images) - 1)
+            self.frame_slider.setRange(0, self.image_volume.shape[2] - 1)
             self.frame_slider.setValue(0)
             self.update_frame_display(0)
             self.app_state = AppState.LOADED
@@ -504,11 +519,11 @@ class YC_VesselTracerApp(QMainWindow):
         self.update_frame_display(value)
 
     def update_frame_display(self, frame_index: int):
-        if not self.images or not (0 <= frame_index < len(self.images)):
+        if self.image_volume is None or not (0 <= frame_index < self.image_volume.shape[2]):
             return
         self.current_frame_index = frame_index
-        self.frame_info_label.setText(self.tr("frame_label", frame_index + 1, len(self.images)))
-        base_img = self.images[frame_index].copy()
+        self.frame_info_label.setText(self.tr("frame_label", frame_index + 1, self.image_volume.shape[2]))
+        base_img = self.image_volume[:, :, frame_index].copy()
         display_img = self.get_overlayed_display_image(base_img, frame_index)
         pixmap = convert_np_to_pixmap(display_img)
         self.image_label.setPixmap(pixmap)
@@ -561,9 +576,13 @@ class YC_VesselTracerApp(QMainWindow):
 
     def update_range_view(self):
         frame_range = self._get_frame_range(for_processing=False)
-        if not frame_range: return
+        if not frame_range or self.image_volume is None: return
         start_f, end_f = frame_range
-        range_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+
+        # Create Maximum Intensity Projection from the specified range in the 3D volume
+        image_subset = self.image_volume[:, :, start_f:end_f + 1]
+        range_pip = np.max(image_subset, axis=2)
+
         if range_pip is not None:
             img_with_overlays = self.get_overlayed_display_image(range_pip, -1)
             self.image_label.setPixmap(convert_np_to_pixmap(img_with_overlays))
@@ -575,11 +594,14 @@ class YC_VesselTracerApp(QMainWindow):
     def open_smoothing_preview(self):
         if self.app_state != AppState.RANGE_CONFIRMED: return
         frame_range = self._get_frame_range(for_processing=False)
-        if not frame_range:
+        if not frame_range or self.image_volume is None:
             QMessageBox.warning(self, "Error", "Please mark points first to define a preview range.")
             return
         start_f, end_f = frame_range
-        pip_image = create_maximum_intensity_projection(self.images[start_f:end_f + 1])
+
+        image_subset = self.image_volume[:, :, start_f:end_f + 1]
+        pip_image = np.max(image_subset, axis=2)
+
         if pip_image is None:
             QMessageBox.warning(self, "Error", "Could not create a preview image.")
             return
@@ -621,14 +643,21 @@ class YC_VesselTracerApp(QMainWindow):
 
     def prepare_and_generate_masks(self) -> bool:
         frame_range = self._get_frame_range(for_processing=True)
-        if not frame_range: return False
+        if not frame_range or self.image_volume is None: return False
         start_f, end_f = frame_range
-        images_subset = self.images[start_f: end_f + 1]
-        progress = QProgressDialog(self.tr("info_processing"), "Cancel", 0, len(images_subset), self)
+
+        # We now pass the 3D volume directly for processing
+        images_subset = self.image_volume[:, :, start_f:end_f + 1]
+
+        # The number of steps for the progress bar is the number of frames (time dimension)
+        progress = QProgressDialog(self.tr("info_processing"), "Cancel", 0, images_subset.shape[2], self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         updater = ProgressUpdater(progress)
+
+        # Assuming create_enhanced_vessel_masks can now handle a 3D volume
         masks = create_enhanced_vessel_masks(images_subset, self.noise_rois, self.global_background_color, self.params, self.smoothing_level, updater)
         updater.finish()
+
         if masks and updater.is_running:
             self.vessel_masks = masks
             self.base_mask_projection = np.max(np.stack(self.vessel_masks, axis=0), axis=0)
@@ -671,9 +700,11 @@ class YC_VesselTracerApp(QMainWindow):
         QApplication.processEvents()
         steps = []
         frame_range = self._get_frame_range(for_processing=False)
-        if not frame_range: return
+        if not frame_range or self.image_volume is None: return
         start_f, end_f = frame_range
-        base_original_pip = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+
+        image_subset = self.image_volume[:, :, start_f:end_f + 1]
+        base_original_pip = np.max(image_subset, axis=2)
 
         mask_steps_data = generate_mask_steps(base_original_pip, self.smoothing_level, self.params, self.global_background_color)
         for img, desc in mask_steps_data:
@@ -885,9 +916,10 @@ class YC_VesselTracerApp(QMainWindow):
         return traces
 
     def reset_system(self):
-        self.images = []
+        self.image_volume = None
         self.global_background_color = 255
         self.vessel_masks = None
+        self.vessel_mask_volume = None
         self.layered_vessel_mask = None
         self.vessel_identity_map = None
         self.noise_rois = []
@@ -949,9 +981,11 @@ class YC_VesselTracerApp(QMainWindow):
         QApplication.processEvents()
 
         frame_range = self._get_frame_range(for_processing=False)
-        if not frame_range: return
+        if not frame_range or self.image_volume is None: return
         start_f, end_f = frame_range
-        image_to_process = create_maximum_intensity_projection(self.images[start_f: end_f + 1])
+
+        image_subset = self.image_volume[:, :, start_f:end_f + 1]
+        image_to_process = np.max(image_subset, axis=2)
 
         step_data = generate_mask_steps(image_to_process, self.smoothing_level, self.params, self.global_background_color)
 
@@ -1064,3 +1098,93 @@ class YC_VesselTracerApp(QMainWindow):
     def closeEvent(self, event):
         self.reset_system()
         event.accept()
+
+    def run_3d_segmentation(self):
+        if self.app_state != AppState.RANGE_CONFIRMED:
+            return
+
+        self.app_state = AppState.PROCESSING
+        self.update_ui_for_state()
+        QApplication.processEvents()
+
+        if self.vessel_masks is None:
+            if not self.prepare_and_generate_masks():
+                QMessageBox.warning(self, "3D Analysis Aborted", "Failed to generate vessel masks for 3D analysis.")
+                self.app_state = AppState.RANGE_CONFIRMED
+                self.update_ui_for_state()
+                return
+
+        try:
+            self.vessel_mask_volume = np.stack(self.vessel_masks, axis=-1)
+        except ValueError as e:
+            QMessageBox.critical(self, "Error", f"Could not create 3D mask volume. Ensure all masks have the same dimensions.\n\n{e}")
+            self.app_state = AppState.RANGE_CONFIRMED
+            self.update_ui_for_state()
+            return
+
+        start_point = find_closest_pixel_on_mask(self.path_points_info[0]['point'], self.base_mask_projection, self.params["MAX_NODE_SEARCH_RADIUS"])
+        end_point = find_closest_pixel_on_mask(self.path_points_info[-1]['point'], self.base_mask_projection, self.params["MAX_NODE_SEARCH_RADIUS"])
+
+        if not start_point or not end_point:
+            QMessageBox.warning(self, "3D Pathfinding Failed", "Could not locate start or end points on the vessel mask.")
+            self.app_state = AppState.RANGE_CONFIRMED
+            self.update_ui_for_state()
+            return
+
+        path_3d = find_path_in_3d_volume(self.vessel_mask_volume, start_point, end_point)
+
+        if path_3d:
+            self.statusBar().showMessage("3D path found. Visualizing...")
+            self.visualize_3d_path(path_3d)
+        else:
+            QMessageBox.warning(self, "3D Pathfinding Failed", "Could not find a path in the 3D volume.")
+
+        self.app_state = AppState.DONE
+        self.update_ui_for_state()
+
+    def visualize_3d_path(self, path_3d):
+        """Visualizes the 3D path using Plotly."""
+        vessel_x, vessel_y, vessel_z = [], [], []
+        # Subsample for performance
+        points = np.argwhere(self.vessel_mask_volume > 0)
+        points = points[::20]  # Take every 20th point
+        vessel_y, vessel_x, vessel_z = points[:, 0], points[:, 1], points[:, 2]
+
+        vessel_trace = go.Scatter3d(
+            x=vessel_x, y=vessel_y, z=vessel_z,
+            mode='markers',
+            marker=dict(size=1, color='gray', opacity=0.1),
+            name='Vessel Volume'
+        )
+
+        path_y, path_x, path_z = zip(*path_3d)
+        path_trace = go.Scatter3d(
+            x=path_x, y=path_y, z=path_z,
+            mode='lines',
+            line=dict(color='lime', width=8),
+            name='3D Path'
+        )
+
+        fig = go.Figure(data=[vessel_trace, path_trace])
+        fig.update_layout(
+            title_text='3D Vessel Path Visualization',
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Frame (Time)',
+                aspectratio=dict(x=1, y=1, z=0.5),
+                yaxis_autorange="reversed"
+            ),
+            margin=dict(l=0, r=0, b=0, t=40)
+        )
+
+        try:
+            with tempfile.NamedTemporaryFile('w', delete=False, suffix='.html', encoding='utf-8') as f:
+                html_content = fig.to_html(full_html=True, include_plotlyjs=True)
+                f.write(html_content)
+                file_url = pathlib.Path(f.name).as_uri()
+
+            webbrowser.open(file_url)
+            self.statusBar().showMessage("3D path visualization opened in browser.", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not open 3D visualization in browser.\n\n{e}")

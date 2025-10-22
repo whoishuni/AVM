@@ -85,19 +85,23 @@ def bridge_gaps_in_mask(mask: np.ndarray, max_distance: int = 15) -> np.ndarray:
     return bridged_mask
 
 def create_enhanced_vessel_masks(
-    images: List[np.ndarray], noise_rois: List, bg_color: int,
+    image_volume: np.ndarray, noise_rois: List, bg_color: int,
     params: dict, smoothing_level: int, worker_thread: Optional[ProgressUpdater]
 ) -> Optional[List[np.ndarray]]:
-    """Generates a sequence of enhanced binary vessel masks from raw images."""
+    """Generates a sequence of enhanced binary vessel masks from a 3D image volume."""
     masks = []
-    total_images = len(images)
+    # The number of images is the size of the third dimension (time)
+    total_images = image_volume.shape[2]
     bg_color_int = int(bg_color)
     max_gap_dist = params["MAX_GAP_BRIDGE_DISTANCE"]
     filter_sigmas = range(1, 6, 2)
 
-    for i, img in enumerate(images):
+    for i in range(total_images):
         if worker_thread and not worker_thread.is_running:
             return None
+
+        # Get the 2D image for the current frame
+        img = image_volume[:, :, i]
 
         processed_img = img.copy()
         processed_img = remove_large_bright_areas(
@@ -128,12 +132,6 @@ def create_enhanced_vessel_masks(
             worker_thread.update(i + 1, total_images, f"Processing frame {i+1}/{total_images}")
 
     return masks
-
-
-def create_maximum_intensity_projection(images: List[np.ndarray]) -> Optional[np.ndarray]:
-    """Creates a Maximum Intensity Projection (MIP) from an image sequence."""
-    if not images: return None
-    return np.max(np.stack(images, axis=0), axis=0)
 
 
 def create_temporal_cost_map(masks: List[np.ndarray], obstacle_cost: float) -> Optional[np.ndarray]:
